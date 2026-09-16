@@ -4,12 +4,14 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.ble.BleConnectionState
+import com.example.ble.PolarBleSdkWrapper
 import com.example.ble.PolarH10BleManager
 import com.example.data.AppDatabase
+import com.example.data.DetectionLogEntity
+import com.example.data.EcgRepository
 import com.example.data.RecordingSessionEntity
 import com.example.dsp.ActivityProcessor
 import com.example.dsp.BeatClassifier
-import com.example.dsp.EcgFilter
 import com.example.dsp.HrvCalculator
 import com.example.dsp.QrsDetector
 import com.example.dsp.WaveAnalyzer
@@ -28,6 +30,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -35,6 +39,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
+import kotlin.math.roundToInt
 
 enum class AppTab(val title: String) {
     PERIODIC("Analyze"),
@@ -50,24 +55,62 @@ data class DetailedEcgViewState(
     val totalCouplets: Int = 0,
     val windowDurationSeconds: Float = 6.0f,
     val centerTimeMs: Long = 0L,
+    val sessionStartTimeMs: Long = 0L,
+    val sessionEndTimeMs: Long = 0L,
     val gainMmPerMv: Float = 10.0f,
     val verticalOffsetMv: Float = 0.0f,
     val baselineCorrectionEnabled: Boolean = true,
     val showBeatMarkers: Boolean = true,
-    val currentEventDescription: String = "No Ectopy Detected"
-)
+    val currentEventDescription: String = "No Ectopy Detected",
+    val hrChartZoomMinutes: Int = 60
+) {
+    val windowStartMs: Long
+        get() {
+            val halfWin = (windowDurationSeconds * 500f).toLong()
+            val start = centerTimeMs - halfWin
+            return if (sessionStartTimeMs > 0) start.coerceAtLeast(sessionStartTimeMs) else start
+        }
+    val windowEndMs: Long
+        get() {
+            val halfWin = (windowDurationSeconds * 500f).toLong()
+            val end = centerTimeMs + halfWin
+            return if (sessionEndTimeMs > 0) end.coerceAtMost(sessionEndTimeMs) else end
+        }
+}
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val db = AppDatabase.getDatabase(application)
-    private val sessionDao = db.sessionDao()
+    val ecgRepository = EcgRepository(db.sessionDao(), db.ecgDataPointDao(), db.detectionLogDao())
+
+    // Official Polar BLE SDK Wrapper
+    val polarSdkWrapper = PolarBleSdkWrapper(application)
+    // Direct BLE fallback driver
     val bleManager = PolarH10BleManager(application)
 
-    val connectionState = bleManager.connectionState
-    val batteryLevel = bleManager.batteryLevel
-    val currentHeartRate = bleManager.currentHeartRate
+    // Unified Connection State & Telemetry
+    val connectionState: StateFlow<BleConnectionState> = combine(
+        polarSdkWrapper.connectionState,
+        bleManager.connectionState
+    ) { sdkState, nativeState ->
+        if (sdkState !is BleConnectionState.Disconnected) sdkState else nativeState
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), BleConnectionState.Disconnected)
 
-    val savedSessions: StateFlow<List<RecordingSessionEntity>> = sessionDao.getAllSessions()
+    val batteryLevel: StateFlow<Int> = combine(
+        polarSdkWrapper.batteryLevel,
+        bleManager.batteryLevel
+    ) { b1, b2 ->
+        if (b1 > 0) b1 else b2
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+
+    val currentHeartRate: StateFlow<Int> = combine(
+        polarSdkWrapper.currentHeartRate,
+        bleManager.currentHeartRate
+    ) { h1, h2 ->
+        if (h1 > 0) h1 else h2
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+
+    val savedSessions: StateFlow<List<RecordingSessionEntity>> = ecgRepository.allSessions
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     private val _selectedTab = MutableStateFlow(AppTab.PERIODIC)
@@ -103,11 +146,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _detailViewState = MutableStateFlow(DetailedEcgViewState())
     val detailViewState: StateFlow<DetailedEcgViewState> = _detailViewState.asStateFlow()
 
+    // Windowed signal and annotations for lightweight ECG strip rendering
+    val windowSignal = MutableStateFlow(FloatArray(0))
+    val windowAnnotations = MutableStateFlow<List<BeatAnnotation>>(emptyList())
+    val windowTimestamps = MutableStateFlow<LongArray>(LongArray(0))
+
     // Full session signal and annotations
     val fullSignalRaw = MutableStateFlow(FloatArray(0))
     val fullSignalCorrected = MutableStateFlow(FloatArray(0))
     val beatAnnotations = MutableStateFlow<List<BeatAnnotation>>(emptyList())
     val rhythmEvents = MutableStateFlow<List<RhythmEvent>>(emptyList())
+
+    // Heart Rate history (timestampMs to BPM) for trend chart
+    private val _hrHistory = MutableStateFlow<List<Pair<Long, Int>>>(emptyList())
+    val hrHistory: StateFlow<List<Pair<Long, Int>>> = _hrHistory.asStateFlow()
 
     // Wave Analysis Result
     private val _waveAnalysis = MutableStateFlow<WaveAnalysisResult?>(null)
@@ -121,8 +173,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _activityData = MutableStateFlow<PhysicalActivityData?>(null)
     val activityData: StateFlow<PhysicalActivityData?> = _activityData.asStateFlow()
 
-    // Live streaming circular buffer for Oscilloscope (130 Hz, 5 seconds window = 650 points)
-    private val bufferSize = 650
+    // Live streaming circular buffer for Oscilloscope (130 Hz, 60 seconds capacity = 7800 points)
+    private val bufferSize = 7800
     private val _liveOscilloscopeBuffer = MutableStateFlow(FloatArray(bufferSize))
     val liveOscilloscopeBuffer: StateFlow<FloatArray> = _liveOscilloscopeBuffer.asStateFlow()
     private val tempLiveArray = FloatArray(bufferSize)
@@ -131,59 +183,218 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _isLivePaused = MutableStateFlow(false)
     val isLivePaused: StateFlow<Boolean> = _isLivePaused.asStateFlow()
 
-    // Real recorded stream accumulation
+    // Real recorded stream accumulation & continuous Room flush with thread safety
+    private val sampleLock = Any()
     private val recordedRawSamples = ArrayList<Float>()
     private val recordedCorrectedSamples = ArrayList<Float>()
     private val recordedTimestamps = ArrayList<Long>()
+    private val continuousDbBuffer = ArrayList<EcgSample>()
+    private val hrAccumulator = ArrayList<Pair<Long, Int>>()
+    private var activeSessionId = UUID.randomUUID().toString()
+    private var currentSequenceIndex = 0L
     private var recordingStartTimeMs = 0L
     private var recordingTimerJob: Job? = null
+    private var lastHrRecordTimeMs = 0L
 
     init {
-        // Collect real incoming BLE samples from Polar H10
+        // Collect real incoming BLE samples from both Polar BLE SDK and native BLE driver
         viewModelScope.launch(Dispatchers.Default) {
-            bleManager.liveSampleFlow.collect { sample ->
-                if (!_isLivePaused.value) {
-                    tempLiveArray[writeHead] = sample.filteredMv
-                    writeHead = (writeHead + 1) % bufferSize
-                    if (writeHead % 4 == 0) {
-                        _liveOscilloscopeBuffer.value = tempLiveArray.clone()
+            merge(polarSdkWrapper.liveSampleFlow, bleManager.liveSampleFlow).collect { sample ->
+                val hr = currentHeartRate.value
+                val now = sample.timestampMs
+
+                synchronized(sampleLock) {
+                    if (!_isLivePaused.value) {
+                        tempLiveArray[writeHead] = sample.filteredMv
+                        writeHead = (writeHead + 1) % bufferSize
+                        if (writeHead % 5 == 0) {
+                            _liveOscilloscopeBuffer.value = tempLiveArray.clone()
+                        }
+                    }
+
+                    // Record HR point every 2 seconds if valid HR or estimate
+                    if (now - lastHrRecordTimeMs >= 2000L) {
+                        lastHrRecordTimeMs = now
+                        val effectiveHr = if (hr > 0) hr else 72
+                        hrAccumulator.add(Pair(now, effectiveHr))
+                        if (hrAccumulator.size > 86400) {
+                            hrAccumulator.removeAt(0)
+                        }
+                        _hrHistory.value = ArrayList(hrAccumulator)
+                    }
+
+                    if (_isRecording.value) {
+                        recordedRawSamples.add(sample.microvolts / 1000f)
+                        recordedCorrectedSamples.add(sample.filteredMv)
+                        recordedTimestamps.add(sample.timestampMs)
+                        continuousDbBuffer.add(sample)
+
+                        // Update session bounds
+                        _detailViewState.value = _detailViewState.value.copy(
+                            sessionEndTimeMs = now
+                        )
+
+                        // Flush 1-second chunks (130 samples) continuously to Room to prevent any data loss
+                        if (continuousDbBuffer.size >= 130) {
+                            flushBufferToRoom()
+                        }
                     }
                 }
+            }
+        }
 
-                if (_isRecording.value) {
-                    recordedRawSamples.add(sample.microvolts / 1000f)
-                    recordedCorrectedSamples.add(sample.filteredMv)
-                    recordedTimestamps.add(sample.timestampMs)
+        // Run continuous real-time analysis loop for Wave Analysis and Periodic Research
+        startPeriodicAnalysisLoop()
+    }
+
+    private fun startPeriodicAnalysisLoop() {
+        viewModelScope.launch(Dispatchers.Default) {
+            while (isActive) {
+                delay(3500L)
+                try {
+                    val (signal, times) = synchronized(sampleLock) {
+                        if (recordedCorrectedSamples.size >= 260) {
+                            val count = recordedCorrectedSamples.size.coerceAtMost(5200)
+                            val start = recordedCorrectedSamples.size - count
+                            Pair(
+                                recordedCorrectedSamples.subList(start, recordedCorrectedSamples.size).toFloatArray(),
+                                recordedTimestamps.subList(start, recordedTimestamps.size).toLongArray()
+                            )
+                        } else if (writeHead >= 260) {
+                            Pair(
+                                tempLiveArray.takeLast(1300).toFloatArray(),
+                                LongArray(1300) { System.currentTimeMillis() - (1300 - 1 - it) * 8L }
+                            )
+                        } else {
+                            Pair(FloatArray(0), LongArray(0))
+                        }
+                    }
+
+                    if (signal.size >= 260) {
+                        val fs = 130f
+                        val peaks = QrsDetector.detectRPeaks(signal, fs)
+                        if (peaks.size >= 2) {
+                            val startTime = if (times.isNotEmpty()) times.first() else System.currentTimeMillis()
+                            val classification = BeatClassifier.classify(peaks, signal, fs, startTime)
+                            val waveRes = WaveAnalyzer.analyze(signal, peaks, fs)
+
+                            _svebCount.value = classification.svebCount
+                            _vebCount.value = classification.vebCount
+                            val totalEctopies = classification.svebCount + classification.vebCount
+                            _totalExtrasystoles.value = totalEctopies
+
+                            val durSec = signal.size / fs
+                            val extrap = if (durSec > 0) ((totalEctopies.toDouble() / durSec) * 86400.0).toInt() else 0
+                            _extrapolationPerDay.value = extrap
+
+                            _waveAnalysis.value = waveRes
+
+                            val rrArray = classification.annotations.map { it.rrIntervalMs }.toFloatArray()
+                            val timesArray = classification.annotations.map { it.timestampMs }.toLongArray()
+                            val ampArray = classification.annotations.map { it.rAmplitudeMv }.toFloatArray()
+                            _hrvResult.value = HrvCalculator.calculate(rrArray, timesArray, ampArray)
+
+                            beatAnnotations.value = classification.annotations
+                            rhythmEvents.value = classification.events
+
+                            // If on ECG strip tab, refresh window annotations
+                            if (_selectedTab.value == AppTab.ECG_STRIP) {
+                                updateVisibleWindow(_detailViewState.value.centerTimeMs, _detailViewState.value.windowDurationSeconds)
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("MainViewModel", "Periodic analysis error: ${e.message}")
                 }
             }
         }
     }
 
+    fun startScan() {
+        polarSdkWrapper.startDiscovery()
+        bleManager.startScan()
+    }
+
+    fun stopScan() {
+        polarSdkWrapper.stopDiscovery()
+        bleManager.stopScan()
+    }
+
+    fun disconnect() {
+        polarSdkWrapper.disconnect()
+        bleManager.disconnect()
+    }
+
     fun selectTab(tab: AppTab) {
         _selectedTab.value = tab
+        if (tab == AppTab.ECG_STRIP) {
+            val (latestTime, startTime) = synchronized(sampleLock) {
+                val latest = if (recordedTimestamps.isNotEmpty()) recordedTimestamps.last() else System.currentTimeMillis()
+                val start = if (recordedTimestamps.isNotEmpty()) recordedTimestamps.first() else latest
+                Pair(latest, start)
+            }
+            _detailViewState.value = _detailViewState.value.copy(
+                centerTimeMs = latestTime,
+                sessionStartTimeMs = startTime,
+                sessionEndTimeMs = latestTime
+            )
+            updateVisibleWindow(latestTime, _detailViewState.value.windowDurationSeconds)
+        }
     }
 
     fun toggleRecording() {
         if (_isRecording.value) {
-            // Stop recording & run real DSP pipeline
+            // Stop recording & run complete DSP analysis pipeline
             _isRecording.value = false
             recordingTimerJob?.cancel()
             recordingTimerJob = null
+            // Final buffer flush to Room
+            flushBufferToRoom()
             processAndSaveRecordedSession()
         } else {
             // Start recording
-            recordedRawSamples.clear()
-            recordedCorrectedSamples.clear()
-            recordedTimestamps.clear()
-            recordingStartTimeMs = System.currentTimeMillis()
+            synchronized(sampleLock) {
+                recordedRawSamples.clear()
+                recordedCorrectedSamples.clear()
+                recordedTimestamps.clear()
+                continuousDbBuffer.clear()
+                activeSessionId = UUID.randomUUID().toString()
+                currentSequenceIndex = 0L
+                recordingStartTimeMs = System.currentTimeMillis()
+            }
             _recordingDurationSeconds.value = 0L
             _isRecording.value = true
+            _detailViewState.value = _detailViewState.value.copy(
+                sessionStartTimeMs = recordingStartTimeMs,
+                sessionEndTimeMs = recordingStartTimeMs,
+                centerTimeMs = recordingStartTimeMs
+            )
 
             recordingTimerJob = viewModelScope.launch {
                 while (isActive) {
                     delay(1000L)
                     _recordingDurationSeconds.value += 1
                 }
+            }
+        }
+    }
+
+    private fun flushBufferToRoom() {
+        val chunk = synchronized(sampleLock) {
+            if (continuousDbBuffer.isEmpty()) return
+            val list = ArrayList(continuousDbBuffer)
+            continuousDbBuffer.clear()
+            list
+        }
+        val seqStart = currentSequenceIndex
+        currentSequenceIndex += chunk.size
+        val sid = activeSessionId
+
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                ecgRepository.insertDataPointsBatch(sid, chunk, seqStart)
+            } catch (e: Exception) {
+                android.util.Log.e("MainViewModel", "Error persisting batch to Room: ${e.localizedMessage}")
             }
         }
     }
@@ -203,7 +414,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             fullSignalRaw.value = raw
             fullSignalCorrected.value = corrected
 
-            // Real QRS detection & classification
+            // Real QRS detection & arrhythmia classification
             val peaks = QrsDetector.detectRPeaks(corrected, fs)
             val startTime = if (timestamps.isNotEmpty()) timestamps.first() else recordingStartTimeMs
             val classification = BeatClassifier.classify(peaks, corrected, fs, startTime)
@@ -242,7 +453,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val hrv = HrvCalculator.calculate(rrArray, timesArray, ampArray)
             _hrvResult.value = hrv
 
-            // Activity (from motion if available or empty)
+            // Activity data
             val act = ActivityProcessor.process(FloatArray(0), timesArray, sveb, veb)
             _activityData.value = act
 
@@ -255,10 +466,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 currentEventDescription = if (couplets.isNotEmpty()) "VEB - Couplet (1/${couplets.size})" else "Normal Sinus Rhythm"
             )
 
-            // Save session to Room database
+            // Save detection events to Room detection_logs table
+            val detectionEntities = classification.annotations.filter { it.beatType != BeatType.NORMAL }.map { ann ->
+                DetectionLogEntity(
+                    sessionId = activeSessionId,
+                    timestampMs = ann.timestampMs,
+                    eventType = ann.beatType.name,
+                    hrBpm = if (ann.rrIntervalMs > 0) (60000f / ann.rrIntervalMs).roundToInt() else 0,
+                    rrIntervalMs = ann.rrIntervalMs,
+                    rAmplitudeMv = ann.rAmplitudeMv,
+                    description = "${ann.beatType.code} Extrasystole at ${formatTime(ann.timestampMs)}",
+                    severity = if (ann.beatType == BeatType.VEB) "WARNING" else "INFO"
+                )
+            }
+            ecgRepository.logDetectionEvents(detectionEntities)
+
+            // Save complete session metadata to Room database
             val meanHr = if (hrv.averageHrBpm > 0) hrv.averageHrBpm.toInt() else 72
             val entity = RecordingSessionEntity(
-                sessionId = UUID.randomUUID().toString(),
+                sessionId = activeSessionId,
                 title = "Polar H10 Session ${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date(startTime))}",
                 startTimestampMs = startTime,
                 durationSeconds = durationSec,
@@ -273,7 +499,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 longestPauseMs = 0f,
                 sampleRateHz = fs
             )
-            sessionDao.insertSession(entity)
+            ecgRepository.saveSession(entity)
         }
     }
 
@@ -289,6 +515,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _totalExtrasystoles.value = total
         val extrap = if (session.durationSeconds > 0) ((total.toDouble() / session.durationSeconds.toDouble()) * 86400.0).toInt() else 0
         _extrapolationPerDay.value = extrap
+
+        // Load data points from Room if available
+        viewModelScope.launch(Dispatchers.IO) {
+            val points = ecgRepository.getDataPointsForSession(session.sessionId)
+            if (points.isNotEmpty()) {
+                val corrected = points.map { it.filteredMv }.toFloatArray()
+                val raw = points.map { it.rawMicrovolts / 1000f }.toFloatArray()
+                fullSignalCorrected.value = corrected
+                fullSignalRaw.value = raw
+
+                val fs = session.sampleRateHz
+                val peaks = QrsDetector.detectRPeaks(corrected, fs)
+                val classification = BeatClassifier.classify(peaks, corrected, fs, session.startTimestampMs)
+                beatAnnotations.value = classification.annotations
+                rhythmEvents.value = classification.events
+            }
+        }
     }
 
     fun toggleLivePause() {
@@ -351,9 +594,164 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         navigateCouplet(1)
     }
 
+    fun updateVisibleWindow(centerMs: Long, durationSec: Float) {
+        val halfWinMs = (durationSec * 500f).toLong()
+        val startMs = centerMs - halfWinMs
+        val endMs = centerMs + halfWinMs
+
+        val (rawSlice, correctedSlice, timeSlice) = synchronized(sampleLock) {
+            if (recordedTimestamps.isNotEmpty()) {
+                val times = recordedTimestamps
+                var startIdx = times.binarySearch(startMs)
+                if (startIdx < 0) startIdx = (-startIdx - 1).coerceIn(0, times.size)
+                var endIdx = times.binarySearch(endMs)
+                if (endIdx < 0) endIdx = (-endIdx - 1).coerceIn(0, times.size)
+                if (endIdx <= startIdx && times.isNotEmpty()) {
+                    startIdx = (times.size - (durationSec * 130).toInt()).coerceAtLeast(0)
+                    endIdx = times.size
+                }
+                val raw = recordedRawSamples.subList(startIdx, endIdx).toFloatArray()
+                val corr = recordedCorrectedSamples.subList(startIdx, endIdx).toFloatArray()
+                val tms = recordedTimestamps.subList(startIdx, endIdx).toLongArray()
+                Triple(raw, corr, tms)
+            } else {
+                val corr = tempLiveArray.clone()
+                val raw = corr.clone()
+                val tms = LongArray(corr.size) { System.currentTimeMillis() - (corr.size - 1 - it) * 8L }
+                Triple(raw, corr, tms)
+            }
+        }
+
+        windowSignal.value = if (_detailViewState.value.baselineCorrectionEnabled) correctedSlice else rawSlice
+        windowTimestamps.value = timeSlice
+
+        val allAnns = beatAnnotations.value
+        windowAnnotations.value = allAnns.filter { it.timestampMs in startMs..endMs }
+    }
+
+    fun seekToTimestamp(timeMs: Long) {
+        _detailViewState.value = _detailViewState.value.copy(centerTimeMs = timeMs)
+        updateVisibleWindow(timeMs, _detailViewState.value.windowDurationSeconds)
+    }
+
+    fun stepTime(deltaSeconds: Float) {
+        val newCenter = _detailViewState.value.centerTimeMs + (deltaSeconds * 1000f).toLong()
+        val clamped = if (_detailViewState.value.sessionEndTimeMs > 0 && _detailViewState.value.sessionStartTimeMs > 0) {
+            newCenter.coerceIn(_detailViewState.value.sessionStartTimeMs, _detailViewState.value.sessionEndTimeMs)
+        } else newCenter
+        seekToTimestamp(clamped)
+    }
+
+    fun setHrZoom(minutes: Int) {
+        _detailViewState.value = _detailViewState.value.copy(hrChartZoomMinutes = minutes)
+    }
+
+    fun bookmarkSymptomSnippet(tag: String = "Symptom Bookmark") {
+        viewModelScope.launch(Dispatchers.IO) {
+            val (snippetSamples, _) = synchronized(sampleLock) {
+                val takeCount = 1300.coerceAtMost(recordedCorrectedSamples.size)
+                if (takeCount > 0) {
+                    val start = recordedCorrectedSamples.size - takeCount
+                    Pair(
+                        recordedCorrectedSamples.subList(start, recordedCorrectedSamples.size).toFloatArray(),
+                        recordedTimestamps.subList(start, recordedTimestamps.size).toLongArray()
+                    )
+                } else {
+                    Pair(
+                        tempLiveArray.takeLast(1300).toFloatArray(),
+                        LongArray(1300) { System.currentTimeMillis() - (1300 - 1 - it) * 8L }
+                    )
+                }
+            }
+
+            val now = System.currentTimeMillis()
+            val hr = currentHeartRate.value
+            val log = DetectionLogEntity(
+                sessionId = activeSessionId,
+                timestampMs = now,
+                eventType = "SYMPTOM_SNIPPET",
+                hrBpm = if (hr > 0) hr else 75,
+                rrIntervalMs = if (hr > 0) (60000f / hr) else 800f,
+                rAmplitudeMv = if (snippetSamples.isNotEmpty()) snippetSamples.maxOrNull() ?: 1.0f else 1.0f,
+                description = "Patient Holter Snippet: $tag at ${formatTime(now)}",
+                severity = "WARNING"
+            )
+            ecgRepository.logDetectionEvent(log)
+        }
+    }
+
+    fun analyzeFromBeginning() {
+        viewModelScope.launch(Dispatchers.Default) {
+            val (raw, corrected, times) = synchronized(sampleLock) {
+                if (recordedCorrectedSamples.size >= 130) {
+                    Triple(
+                        recordedRawSamples.toFloatArray(),
+                        recordedCorrectedSamples.toFloatArray(),
+                        recordedTimestamps.toLongArray()
+                    )
+                } else {
+                    Triple(
+                        tempLiveArray.clone(),
+                        tempLiveArray.clone(),
+                        LongArray(tempLiveArray.size) { System.currentTimeMillis() - (tempLiveArray.size - 1 - it) * 8L }
+                    )
+                }
+            }
+
+            if (corrected.size >= 130) {
+                val fs = 130f
+                val peaks = QrsDetector.detectRPeaks(corrected, fs)
+                val startTime = if (times.isNotEmpty()) times.first() else System.currentTimeMillis()
+                val classification = BeatClassifier.classify(peaks, corrected, fs, startTime)
+
+                beatAnnotations.value = classification.annotations
+                rhythmEvents.value = classification.events
+                _svebCount.value = classification.svebCount
+                _vebCount.value = classification.vebCount
+                val totalEctopies = classification.svebCount + classification.vebCount
+                _totalExtrasystoles.value = totalEctopies
+
+                val durationSec = (corrected.size / fs).toLong()
+                val hours = durationSec / 3600
+                val mins = (durationSec % 3600) / 60
+                val secs = durationSec % 60
+                _sessionDurationText.value = String.format("%02d h %02d min %02d sec", hours, mins, secs)
+
+                val sdf = SimpleDateFormat("yyyy-MM-dd 'à' HH:mm:ss", Locale.getDefault())
+                _sessionTimestamp.value = sdf.format(Date(startTime))
+
+                val extrap = if (durationSec > 0) ((totalEctopies.toDouble() / durationSec.toDouble()) * 86400.0).toInt() else 0
+                _extrapolationPerDay.value = extrap
+
+                _waveAnalysis.value = WaveAnalyzer.analyze(corrected, peaks, fs)
+
+                val rrArray = classification.annotations.map { it.rrIntervalMs }.toFloatArray()
+                val timesArray = classification.annotations.map { it.timestampMs }.toLongArray()
+                val ampArray = classification.annotations.map { it.rAmplitudeMv }.toFloatArray()
+                _hrvResult.value = HrvCalculator.calculate(rrArray, timesArray, ampArray)
+
+                val endTime = if (times.isNotEmpty()) times.last() else startTime
+                _detailViewState.value = _detailViewState.value.copy(
+                    centerTimeMs = startTime,
+                    sessionStartTimeMs = startTime,
+                    sessionEndTimeMs = endTime,
+                    currentEventDescription = "Holter Analysis from Beginning ($totalEctopies total ectopies)"
+                )
+                updateVisibleWindow(startTime, _detailViewState.value.windowDurationSeconds)
+                _selectedTab.value = AppTab.ECG_STRIP
+            }
+        }
+    }
+
     private fun formatTime(ms: Long): String {
         val date = Date(ms)
         val sdf = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
         return sdf.format(date)
+    }
+
+    override fun onCleared() {
+        polarSdkWrapper.cleanup()
+        bleManager.cleanup()
+        super.onCleared()
     }
 }

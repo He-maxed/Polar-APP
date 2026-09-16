@@ -23,10 +23,19 @@ import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.outlined.BatteryFull
+import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -58,46 +67,107 @@ fun ClinicalTopBar(
     onToggleRecording: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    var showStopConfirmationDialog by remember { mutableStateOf(false) }
+
+    if (showStopConfirmationDialog) {
+        AlertDialog(
+            onDismissRequest = { showStopConfirmationDialog = false },
+            title = {
+                Text(
+                    text = "Stop Holter Recording?",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 17.sp,
+                    color = ClinicalTextPrimary
+                )
+            },
+            text = {
+                Text(
+                    text = "Are you sure you want to stop recording? All ECG data points and arrhythmia detection logs will be saved safely to the local database.",
+                    fontSize = 13.sp,
+                    color = ClinicalTextSecondary
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showStopConfirmationDialog = false
+                        onToggleRecording()
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = MedicalRed),
+                    modifier = Modifier.testTag("dialog_confirm_stop_rec")
+                ) {
+                    Text("Stop & Save", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                OutlinedButton(
+                    onClick = { showStopConfirmationDialog = false },
+                    modifier = Modifier.testTag("dialog_cancel_stop_rec")
+                ) {
+                    Text("Keep Recording")
+                }
+            }
+        )
+    }
+
     Column(
         modifier = modifier
             .fillMaxWidth()
             .background(ClinicalSurface)
             .padding(horizontal = 16.dp, vertical = 8.dp)
     ) {
-        // App header title & status
+        // App header title & Top-Right Recording Corner Button
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(
-                text = "Polar ECG Clinical",
-                fontWeight = FontWeight.Bold,
-                fontSize = 18.sp,
-                color = ClinicalTextPrimary
-            )
+            Column {
+                Text(
+                    text = "Polar ECG Clinical",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 18.sp,
+                    color = ClinicalTextPrimary
+                )
+                Text(
+                    text = if (isRecording) "Continuous 48h Session Active" else "Ready to Record",
+                    fontSize = 11.sp,
+                    color = if (isRecording) MedicalRed else ClinicalTextSecondary
+                )
+            }
 
-            // Live Recording badge
+            // Prominent Top-Right Corner REC / STOP Button
+            val mins = (recordingDurationSeconds % 3600) / 60
+            val secs = recordingDurationSeconds % 60
+            val timerString = String.format("%02d:%02d", mins, secs)
+
             Row(
                 modifier = Modifier
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(if (isRecording) MedicalRed.copy(alpha = 0.12f) else ClinicalBorder.copy(alpha = 0.4f))
-                    .clickable { onToggleRecording() }
-                    .padding(horizontal = 10.dp, vertical = 4.dp),
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(if (isRecording) MedicalRed else MedicalTeal)
+                    .clickable {
+                        if (isRecording) {
+                            showStopConfirmationDialog = true
+                        } else {
+                            onToggleRecording()
+                        }
+                    }
+                    .padding(horizontal = 14.dp, vertical = 7.dp)
+                    .testTag("topbar_corner_rec_btn"),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(8.dp)
-                        .clip(CircleShape)
-                        .background(if (isRecording) MedicalRed else ClinicalTextSecondary)
+                Icon(
+                    imageVector = if (isRecording) Icons.Default.Stop else Icons.Default.FiberManualRecord,
+                    contentDescription = if (isRecording) "Stop Recording" else "Start Recording",
+                    tint = Color.White,
+                    modifier = Modifier.size(15.dp)
                 )
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
-                    text = if (isRecording) "REC" else "STANDBY",
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = if (isRecording) MedicalRed else ClinicalTextSecondary
+                    text = if (isRecording) "STOP REC ($timerString)" else "START REC",
+                    color = Color.White,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold
                 )
             }
         }

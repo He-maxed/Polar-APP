@@ -73,6 +73,9 @@ fun MainAppScreen(viewModel: MainViewModel) {
     val correctedSignal by viewModel.fullSignalCorrected.collectAsState()
     val rawSignal by viewModel.fullSignalRaw.collectAsState()
     val beatAnnotations by viewModel.beatAnnotations.collectAsState()
+    val windowSignal by viewModel.windowSignal.collectAsState()
+    val windowAnnotations by viewModel.windowAnnotations.collectAsState()
+    val hrHistory by viewModel.hrHistory.collectAsState()
 
     val liveBuffer by viewModel.liveOscilloscopeBuffer.collectAsState()
     val isLivePaused by viewModel.isLivePaused.collectAsState()
@@ -90,7 +93,7 @@ fun MainAppScreen(viewModel: MainViewModel) {
     ) { permissions ->
         val allGranted = permissions.values.all { it }
         if (allGranted) {
-            viewModel.bleManager.startScan()
+            viewModel.startScan()
         }
     }
 
@@ -106,7 +109,7 @@ fun MainAppScreen(viewModel: MainViewModel) {
                 isRecording = isRecording,
                 onToggleConnection = {
                     if (connectionState is BleConnectionState.Connected) {
-                        viewModel.bleManager.disconnect()
+                        viewModel.disconnect()
                     } else {
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                             blePermissionLauncher.launch(
@@ -116,7 +119,7 @@ fun MainAppScreen(viewModel: MainViewModel) {
                                 )
                             )
                         } else {
-                            viewModel.bleManager.startScan()
+                            viewModel.startScan()
                         }
                     }
                 },
@@ -151,16 +154,22 @@ fun MainAppScreen(viewModel: MainViewModel) {
                         sessionDuration = sessionDuration,
                         onNavigateTab = { viewModel.selectTab(it) },
                         onSearchFromBeginning = {
-                            viewModel.selectTab(AppTab.ECG_STRIP)
+                            viewModel.analyzeFromBeginning()
                         }
                     )
                 }
                 AppTab.ECG_STRIP -> {
-                    val activeSignal = if (detailViewState.baselineCorrectionEnabled) correctedSignal else rawSignal
+                    val activeSignal = if (windowSignal.isNotEmpty()) {
+                        windowSignal
+                    } else {
+                        if (detailViewState.baselineCorrectionEnabled) correctedSignal else rawSignal
+                    }
+                    val activeAnnotations = if (windowAnnotations.isNotEmpty()) windowAnnotations else beatAnnotations
                     DetailStripView(
                         viewState = detailViewState,
                         signal = activeSignal,
-                        beatAnnotations = beatAnnotations,
+                        beatAnnotations = activeAnnotations,
+                        hrHistory = hrHistory,
                         sessionTimestamp = sessionTimestamp,
                         sessionDuration = sessionDuration,
                         onLocateExtrasystoles = { viewModel.locateNextExtrasystole() },
@@ -168,17 +177,21 @@ fun MainAppScreen(viewModel: MainViewModel) {
                         onAdjustGain = { viewModel.adjustGain(it) },
                         onAdjustVerticalOffset = { viewModel.adjustVerticalOffset(it) },
                         onZoomTemporal = { viewModel.zoomTemporal(it) },
-                        onStepCouplet = { viewModel.navigateCouplet(it) }
+                        onStepCouplet = { viewModel.navigateCouplet(it) },
+                        onSeekTimestamp = { viewModel.seekToTimestamp(it) },
+                        onStepTime = { viewModel.stepTime(it) },
+                        onSelectHrZoom = { viewModel.setHrZoom(it) }
                     )
                 }
                 AppTab.LIVE_OSCILLOSCOPE -> {
                     OscilloscopeView(
                         liveBuffer = liveBuffer,
+                        heartRateBpm = heartRate,
                         isPaused = isLivePaused,
                         isRecording = isRecording,
                         recordingDurationSeconds = recordingDuration,
                         onTogglePause = { viewModel.toggleLivePause() },
-                        onToggleRecording = { viewModel.toggleRecording() }
+                        onBookmarkSnippet = { viewModel.bookmarkSymptomSnippet(it) }
                     )
                 }
                 AppTab.HRV -> {

@@ -1,5 +1,6 @@
 package com.example.ui.screens
 
+import android.graphics.Paint
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -26,6 +27,8 @@ import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.FastRewind
 import androidx.compose.material.icons.filled.FilterList
+import androidx.compose.material.icons.filled.FirstPage
+import androidx.compose.material.icons.filled.LastPage
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.ShowChart
 import androidx.compose.material.icons.filled.UnfoldLess
@@ -35,6 +38,8 @@ import androidx.compose.material.icons.filled.ZoomOut
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -52,9 +57,9 @@ import androidx.compose.ui.unit.sp
 import com.example.model.BeatAnnotation
 import com.example.model.BeatType
 import com.example.ui.DetailedEcgViewState
+import com.example.ui.components.HeartRateTrendChart
 import com.example.ui.theme.ClinicalBg
 import com.example.ui.theme.ClinicalBorder
-import com.example.ui.theme.ClinicalCardBg
 import com.example.ui.theme.ClinicalSurface
 import com.example.ui.theme.ClinicalTextPrimary
 import com.example.ui.theme.ClinicalTextSecondary
@@ -65,14 +70,17 @@ import com.example.ui.theme.MedicalOrange
 import com.example.ui.theme.MedicalRed
 import com.example.ui.theme.MedicalTeal
 import com.example.ui.theme.PaperEcgBg
-import com.example.ui.theme.PaperGridMajor
 import com.example.ui.theme.PaperGridMinor
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @Composable
 fun DetailStripView(
     viewState: DetailedEcgViewState,
     signal: FloatArray,
     beatAnnotations: List<BeatAnnotation>,
+    hrHistory: List<Pair<Long, Int>>,
     sessionTimestamp: String,
     sessionDuration: String,
     onLocateExtrasystoles: () -> Unit,
@@ -81,6 +89,9 @@ fun DetailStripView(
     onAdjustVerticalOffset: (Boolean) -> Unit,
     onZoomTemporal: (Boolean) -> Unit,
     onStepCouplet: (Int) -> Unit,
+    onSeekTimestamp: (Long) -> Unit,
+    onStepTime: (Float) -> Unit,
+    onSelectHrZoom: (Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val scrollState = rememberScrollState()
@@ -91,12 +102,11 @@ fun DetailStripView(
             .background(ClinicalBg)
             .verticalScroll(scrollState)
             .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        // Date & Duration pill
-        Box(
+        // Date & Session Duration Badge
+        Row(
             modifier = Modifier
-                .fillMaxWidth()
                 .clip(RoundedCornerShape(10.dp))
                 .background(ClinicalBorder.copy(alpha = 0.4f))
                 .padding(horizontal = 14.dp, vertical = 6.dp)
@@ -109,6 +119,19 @@ fun DetailStripView(
             )
         }
 
+        // Heart Rate Trend Chart with 1h-48h Zoom
+        HeartRateTrendChart(
+            hrPoints = hrHistory,
+            sessionStartTimeMs = viewState.sessionStartTimeMs,
+            sessionEndTimeMs = viewState.sessionEndTimeMs,
+            currentCursorTimeMs = viewState.centerTimeMs,
+            windowDurationSeconds = viewState.windowDurationSeconds,
+            selectedZoomMinutes = viewState.hrChartZoomMinutes,
+            onSelectZoomMinutes = onSelectHrZoom,
+            onSeekTimestamp = onSeekTimestamp,
+            modifier = Modifier.testTag("hr_trend_chart")
+        )
+
         // Main ECG Plot Card
         Card(
             modifier = Modifier.fillMaxWidth(),
@@ -120,22 +143,32 @@ fun DetailStripView(
                 modifier = Modifier.padding(14.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                // Event Header
-                Text(
-                    text = viewState.currentEventDescription,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = ClinicalTextPrimary
-                )
-                Text(
-                    text = sessionTimestamp.replace("à ", ""),
-                    fontSize = 11.sp,
-                    color = ClinicalTextSecondary
-                )
+                // Event Header & Window Time
+                val timeFmt = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+                val windowCenterStr = if (viewState.centerTimeMs > 0) timeFmt.format(Date(viewState.centerTimeMs)) else ""
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = viewState.currentEventDescription,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = ClinicalTextPrimary
+                    )
+                    Text(
+                        text = if (windowCenterStr.isNotEmpty()) "Window: $windowCenterStr (±${(viewState.windowDurationSeconds / 2).toInt()}s)" else "",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MedicalTeal
+                    )
+                }
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                // ECG Canvas
+                // ECG Canvas with real beat annotations & accurate timing
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -147,48 +180,111 @@ fun DetailStripView(
                     EcgStripCanvas(
                         signal = signal,
                         annotations = beatAnnotations,
+                        windowStartMs = viewState.windowStartMs,
+                        windowEndMs = viewState.windowEndMs,
                         gainMmPerMv = viewState.gainMmPerMv,
                         verticalOffsetMv = viewState.verticalOffsetMv
                     )
                 }
 
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = "Time",
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = ClinicalTextSecondary
-                )
+                Spacer(modifier = Modifier.height(6.dp))
+
+                // Timeline Scrubber Slider (48h scrollable range)
+                if (viewState.sessionEndTimeMs > viewState.sessionStartTimeMs) {
+                    val progress = (viewState.centerTimeMs - viewState.sessionStartTimeMs).toFloat() /
+                            (viewState.sessionEndTimeMs - viewState.sessionStartTimeMs).toFloat()
+
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = timeFmt.format(Date(viewState.sessionStartTimeMs)),
+                                fontSize = 10.sp,
+                                color = ClinicalTextSecondary
+                            )
+                            Text(
+                                text = "Scrub Timeline (${String.format("%.1f%%", progress.coerceIn(0f, 1f) * 100f)})",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MedicalNavy
+                            )
+                            Text(
+                                text = timeFmt.format(Date(viewState.sessionEndTimeMs)),
+                                fontSize = 10.sp,
+                                color = ClinicalTextSecondary
+                            )
+                        }
+                        Slider(
+                            value = viewState.centerTimeMs.toFloat(),
+                            onValueChange = { onSeekTimestamp(it.toLong()) },
+                            valueRange = viewState.sessionStartTimeMs.toFloat()..viewState.sessionEndTimeMs.toFloat(),
+                            colors = SliderDefaults.colors(
+                                thumbColor = MedicalTeal,
+                                activeTrackColor = MedicalTeal,
+                                inactiveTrackColor = ClinicalBorder
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(28.dp)
+                                .testTag("slider_timeline")
+                        )
+                    }
+                }
             }
         }
 
-        // VEB - Couplet banner
+        // Stepper Navigation Controls (Fast rewind, Step, Jump to Latest)
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(12.dp))
-                .background(Color(0xFFFFF3EE))
-                .border(1.dp, MedicalOrange.copy(alpha = 0.3f), RoundedCornerShape(12.dp))
-                .padding(vertical = 10.dp),
-            horizontalArrangement = Arrangement.Center,
-            verticalAlignment = Alignment.CenterVertically
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            Icon(
-                imageVector = Icons.Default.FilterList,
-                contentDescription = null,
-                tint = MedicalOrange,
-                modifier = Modifier.size(18.dp)
+            ControlKeyButton(
+                icon = Icons.Default.FirstPage,
+                label = "Start",
+                onClick = { onSeekTimestamp(viewState.sessionStartTimeMs) },
+                testTag = "btn_nav_start",
+                modifier = Modifier.weight(1f)
             )
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(
-                text = "VEB - Couplet",
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Bold,
-                color = MedicalOrange
+            ControlKeyButton(
+                icon = Icons.Default.FastRewind,
+                label = "-30s",
+                onClick = { onStepTime(-30f) },
+                testTag = "btn_nav_prev_30",
+                modifier = Modifier.weight(1f)
+            )
+            ControlKeyButton(
+                icon = Icons.Default.ChevronLeft,
+                label = "-5s",
+                onClick = { onStepTime(-5f) },
+                testTag = "btn_nav_prev_5",
+                modifier = Modifier.weight(1f)
+            )
+            ControlKeyButton(
+                icon = Icons.Default.ChevronRight,
+                label = "+5s",
+                onClick = { onStepTime(5f) },
+                testTag = "btn_nav_next_5",
+                modifier = Modifier.weight(1f)
+            )
+            ControlKeyButton(
+                icon = Icons.Default.FastForward,
+                label = "+30s",
+                onClick = { onStepTime(30f) },
+                testTag = "btn_nav_next_30",
+                modifier = Modifier.weight(1f)
+            )
+            ControlKeyButton(
+                icon = Icons.Default.LastPage,
+                label = "Latest",
+                onClick = { onSeekTimestamp(viewState.sessionEndTimeMs) },
+                testTag = "btn_nav_latest",
+                modifier = Modifier.weight(1f)
             )
         }
 
-        // Three Navigation / Search Action Buttons (Screenshot 2)
+        // Search & Locating Action Buttons
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -203,7 +299,7 @@ fun DetailStripView(
             )
             ActionTileButton(
                 icon = Icons.Default.FilterList,
-                label = "Multiples",
+                label = "Multiples\n(Couplets)",
                 tint = MedicalOrange,
                 onClick = onLocateMultiples,
                 testTag = "btn_locate_multiples",
@@ -211,9 +307,9 @@ fun DetailStripView(
             )
             ActionTileButton(
                 icon = Icons.Default.ShowChart,
-                label = "ECG signal",
+                label = "Window Zoom\n(±3s - ±10s)",
                 tint = MedicalTeal,
-                onClick = { /* Toggles full signal */ },
+                onClick = { onZoomTemporal(false) },
                 testTag = "btn_ecg_signal",
                 modifier = Modifier.weight(1f)
             )
@@ -221,7 +317,7 @@ fun DetailStripView(
 
         // AMPLITUDE Controls
         Text(
-            text = "AMPLITUDE",
+            text = "AMPLITUDE & SENSITIVITY",
             fontSize = 10.sp,
             fontWeight = FontWeight.Bold,
             color = ClinicalTextSecondary,
@@ -233,33 +329,37 @@ fun DetailStripView(
         ) {
             ControlKeyButton(
                 icon = Icons.Default.UnfoldLess,
+                label = "Gain -",
                 onClick = { onAdjustGain(false) },
                 testTag = "btn_amp_contract",
                 modifier = Modifier.weight(1f)
             )
             ControlKeyButton(
                 icon = Icons.Default.UnfoldMore,
+                label = "Gain +",
                 onClick = { onAdjustGain(true) },
                 testTag = "btn_amp_expand",
                 modifier = Modifier.weight(1f)
             )
             ControlKeyButton(
                 icon = Icons.Default.ArrowUpward,
+                label = "Base Up",
                 onClick = { onAdjustVerticalOffset(true) },
                 testTag = "btn_amp_up",
                 modifier = Modifier.weight(1f)
             )
             ControlKeyButton(
                 icon = Icons.Default.ArrowDownward,
+                label = "Base Down",
                 onClick = { onAdjustVerticalOffset(false) },
                 testTag = "btn_amp_down",
                 modifier = Modifier.weight(1f)
             )
         }
 
-        // TEMPORAL NAVIGATION Controls
+        // TEMPORAL ZOOM Controls
         Text(
-            text = "TEMPORAL NAVIGATION",
+            text = "TIME SCALE ZOOM",
             fontSize = 10.sp,
             fontWeight = FontWeight.Bold,
             color = ClinicalTextSecondary,
@@ -267,42 +367,20 @@ fun DetailStripView(
         )
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             ControlKeyButton(
                 icon = Icons.Default.ZoomIn,
+                label = "Zoom In (Time)",
                 onClick = { onZoomTemporal(true) },
                 testTag = "btn_temp_zoomin",
                 modifier = Modifier.weight(1f)
             )
             ControlKeyButton(
                 icon = Icons.Default.ZoomOut,
+                label = "Zoom Out (Time)",
                 onClick = { onZoomTemporal(false) },
                 testTag = "btn_temp_zoomout",
-                modifier = Modifier.weight(1f)
-            )
-            ControlKeyButton(
-                icon = Icons.Default.FastRewind,
-                onClick = { onStepCouplet(-5) },
-                testTag = "btn_temp_fastrewind",
-                modifier = Modifier.weight(1f)
-            )
-            ControlKeyButton(
-                icon = Icons.Default.ChevronLeft,
-                onClick = { onStepCouplet(-1) },
-                testTag = "btn_temp_prev",
-                modifier = Modifier.weight(1f)
-            )
-            ControlKeyButton(
-                icon = Icons.Default.ChevronRight,
-                onClick = { onStepCouplet(1) },
-                testTag = "btn_temp_next",
-                modifier = Modifier.weight(1f)
-            )
-            ControlKeyButton(
-                icon = Icons.Default.FastForward,
-                onClick = { onStepCouplet(5) },
-                testTag = "btn_temp_fastforward",
                 modifier = Modifier.weight(1f)
             )
         }
@@ -320,7 +398,7 @@ private fun ActionTileButton(
 ) {
     Column(
         modifier = modifier
-            .height(82.dp)
+            .height(78.dp)
             .clip(RoundedCornerShape(12.dp))
             .background(ClinicalSurface)
             .border(1.5.dp, tint.copy(alpha = 0.8f), RoundedCornerShape(12.dp))
@@ -334,7 +412,7 @@ private fun ActionTileButton(
             imageVector = icon,
             contentDescription = null,
             tint = tint,
-            modifier = Modifier.size(22.dp)
+            modifier = Modifier.size(20.dp)
         )
         Spacer(modifier = Modifier.height(4.dp))
         Text(
@@ -351,32 +429,49 @@ private fun ActionTileButton(
 @Composable
 private fun ControlKeyButton(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String = "",
     onClick: () -> Unit,
     testTag: String,
     modifier: Modifier = Modifier
 ) {
-    Box(
+    Column(
         modifier = modifier
-            .height(44.dp)
+            .height(46.dp)
             .clip(RoundedCornerShape(8.dp))
-            .background(Color(0xFFDCE2E8))
+            .background(Color(0xFFE2E7ED))
             .clickable { onClick() }
             .testTag(testTag),
-        contentAlignment = Alignment.Center
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
     ) {
         Icon(
             imageVector = icon,
             contentDescription = null,
             tint = MedicalNavy,
-            modifier = Modifier.size(20.dp)
+            modifier = Modifier.size(18.dp)
         )
+        if (label.isNotEmpty()) {
+            Text(
+                text = label,
+                fontSize = 9.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = MedicalNavy
+            )
+        }
     }
 }
 
+/**
+ * Accurate ECG Strip Canvas.
+ * Renders real calibrated ECG traces, real R-peak beat markers (VEB = Red, SVEB = Amber, Normal = Green),
+ * and calibrated X-axis time ticks.
+ */
 @Composable
 private fun EcgStripCanvas(
     signal: FloatArray,
     annotations: List<BeatAnnotation>,
+    windowStartMs: Long,
+    windowEndMs: Long,
     gainMmPerMv: Float,
     verticalOffsetMv: Float
 ) {
@@ -421,9 +516,9 @@ private fun EcgStripCanvas(
         val mvMax = 2.0f
         val mvRange = mvMax - mvMin
 
-        val paint = android.graphics.Paint().apply {
+        val paint = Paint().apply {
             color = android.graphics.Color.DKGRAY
-            textSize = 24f
+            textSize = 22f
             isAntiAlias = true
         }
 
@@ -432,107 +527,100 @@ private fun EcgStripCanvas(
             val normY = (v - mvMin) / mvRange
             val yPos = (10f + plotH) - (normY * plotH)
             drawContext.canvas.nativeCanvas.drawText(
-                String.format("%.1f", v),
+                String.format(Locale.US, "%.1f", v),
                 4f,
-                yPos + 8f,
+                yPos + 7f,
                 paint
             )
         }
 
         // mV label
-        drawContext.canvas.nativeCanvas.drawText("mV", 4f, 24f, paint)
+        drawContext.canvas.nativeCanvas.drawText("mV", 4f, 22f, paint)
 
         // Plot ECG Trace
         if (signal.isNotEmpty()) {
-            val normalPath = Path()
-            val coupletPath = Path()
-
-            // Display centered ~6 seconds snippet
-            val nSamples = signal.size.coerceAtMost(780)
-            var startedNormal = false
-            var startedCouplet = false
-
-            // Couplet range index (around center 50% of the window)
-            val coupletStartSample = (nSamples * 0.44f).toInt()
-            val coupletEndSample = (nSamples * 0.68f).toInt()
+            val nSamples = signal.size
+            val ecgPath = Path()
+            var started = false
 
             for (i in 0 until nSamples) {
-                val x = leftMargin + (i.toFloat() / nSamples.toFloat()) * plotW
-                val mv = signal[i] + verticalOffsetMv
+                val x = leftMargin + (i.toFloat() / (nSamples - 1).coerceAtLeast(1).toFloat()) * plotW
+                val mv = (signal[i] * (gainMmPerMv / 10.0f)) + verticalOffsetMv
                 val normY = (mv - mvMin) / mvRange
                 val y = (10f + plotH) - (normY * plotH).coerceIn(0f, plotH)
 
-                val isCouplet = i in coupletStartSample..coupletEndSample
-
-                if (isCouplet) {
-                    if (!startedCouplet) {
-                        coupletPath.moveTo(x, y)
-                        startedCouplet = true
-                    } else {
-                        coupletPath.lineTo(x, y)
-                    }
+                if (!started) {
+                    ecgPath.moveTo(x, y)
+                    started = true
                 } else {
-                    if (!startedNormal) {
-                        normalPath.moveTo(x, y)
-                        startedNormal = true
-                    } else {
-                        normalPath.lineTo(x, y)
-                    }
+                    ecgPath.lineTo(x, y)
                 }
             }
 
-            // Draw Normal segments in Green
             drawPath(
-                path = normalPath,
-                color = MedicalGreen,
+                path = ecgPath,
+                color = MedicalTeal,
                 style = Stroke(width = 2.2f)
             )
+        }
 
-            // Draw Couplet segment in Red
-            drawPath(
-                path = coupletPath,
-                color = MedicalRed,
-                style = Stroke(width = 2.4f)
-            )
-
-            // Draw beat marker dots
-            // Green dots on normal beats, Red dots on couplet peaks!
-            val beatDots = listOf(
-                Pair(0.08f, 0.85f) to false,
-                Pair(0.20f, 0.88f) to false,
-                Pair(0.32f, 0.85f) to false,
-                Pair(0.44f, 0.82f) to false,
-                Pair(0.53f, 1.62f) to true, // VEB 1
-                Pair(0.61f, 1.88f) to true, // VEB 2
-                Pair(0.74f, 0.86f) to false,
-                Pair(0.86f, 0.72f) to false
-            )
-
-            beatDots.forEach { (dot, isVeb) ->
-                val (normX, dotMv) = dot
-                val x = leftMargin + normX * plotW
+        // Draw Accurate Detected Beat Marker Dots (V, S, N)
+        val spanMs = (windowEndMs - windowStartMs).coerceAtLeast(1000L)
+        annotations.forEach { ann ->
+            val frac = (ann.timestampMs - windowStartMs).toFloat() / spanMs.toFloat()
+            if (frac in 0.02f..0.98f) {
+                val dotX = leftMargin + frac * plotW
+                val dotMv = (ann.rAmplitudeMv * (gainMmPerMv / 10.0f)) + verticalOffsetMv
                 val normY = (dotMv - mvMin) / mvRange
-                val y = (10f + plotH) - (normY * plotH)
+                val dotY = (10f + plotH) - (normY * plotH).coerceIn(10f, 10f + plotH)
+
+                val dotColor = when (ann.beatType) {
+                    BeatType.VEB -> MedicalRed
+                    BeatType.SVEB -> Color(0xFFFFA000)
+                    BeatType.NORMAL -> MedicalGreen
+                    else -> MedicalTeal
+                }
 
                 drawCircle(
-                    color = if (isVeb) MedicalRed else MedicalGreen,
-                    radius = 5f,
-                    center = Offset(x, y)
+                    color = dotColor,
+                    radius = 5.5f,
+                    center = Offset(dotX, dotY)
                 )
-            }
 
-            // X-axis timestamps (Screenshot 2: 10:53:37, 10:53:38, 10:53:39, 10:53:40, 10:53:41)
-            val timeLabels = listOf("10:53:37", "10:53:38", "10:53:39", "10:53:40", "10:53:41")
-            timeLabels.forEachIndexed { index, lbl ->
-                val frac = index.toFloat() / (timeLabels.size - 1)
-                val x = leftMargin + frac * plotW - 32f
+                // Label text above marker (V, S, N)
+                val dotTagPaint = Paint().apply {
+                    color = when (ann.beatType) {
+                        BeatType.VEB -> android.graphics.Color.RED
+                        BeatType.SVEB -> android.graphics.Color.rgb(240, 140, 0)
+                        else -> android.graphics.Color.rgb(0, 140, 60)
+                    }
+                    textSize = 20f
+                    isFakeBoldText = true
+                    isAntiAlias = true
+                }
                 drawContext.canvas.nativeCanvas.drawText(
-                    lbl,
-                    x,
-                    h - 4f,
-                    paint
+                    ann.beatType.code,
+                    dotX - 6f,
+                    dotY - 10f,
+                    dotTagPaint
                 )
             }
+        }
+
+        // Calibrated X-axis Timestamps across visible window
+        val numTicks = 5
+        val timeFmt = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+        for (i in 0 until numTicks) {
+            val frac = i.toFloat() / (numTicks - 1).toFloat()
+            val tickTimeMs = windowStartMs + (frac * spanMs).toLong()
+            val lbl = timeFmt.format(Date(tickTimeMs))
+            val x = leftMargin + frac * plotW - 28f
+            drawContext.canvas.nativeCanvas.drawText(
+                lbl,
+                x.coerceAtLeast(leftMargin),
+                h - 4f,
+                paint
+            )
         }
     }
 }

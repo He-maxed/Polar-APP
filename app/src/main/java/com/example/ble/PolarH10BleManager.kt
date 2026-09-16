@@ -94,6 +94,7 @@ class PolarH10BleManager(private val context: Context) {
 
     private val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
     private val bluetoothAdapter: BluetoothAdapter? = bluetoothManager?.adapter
+    private var currentScanCallback: ScanCallback? = null
 
     @SuppressLint("MissingPermission")
     fun startScan() {
@@ -122,6 +123,7 @@ class PolarH10BleManager(private val context: Context) {
                                 _availableDevices.value = ArrayList(foundList)
                                 // Auto-connect to first Polar device found
                                 scanner.stopScan(this)
+                                currentScanCallback = null
                                 connectDevice(device)
                             }
                         }
@@ -133,6 +135,7 @@ class PolarH10BleManager(private val context: Context) {
                 }
             }
 
+            currentScanCallback = scanCallback
             scanner.startScan(scanCallback)
 
             // Auto-stop scanning after 15 seconds if nothing found
@@ -503,5 +506,25 @@ class PolarH10BleManager(private val context: Context) {
         _currentHeartRate.value = 0
         _batteryLevel.value = 0
         liveFilter.reset()
+    }
+
+    @SuppressLint("MissingPermission")
+    fun stopScan() {
+        try {
+            val scanner = bluetoothAdapter?.bluetoothLeScanner
+            val cb = currentScanCallback
+            if (cb != null) {
+                scanner?.stopScan(cb)
+            }
+        } catch (_: Exception) {}
+        currentScanCallback = null
+        if (_connectionState.value is BleConnectionState.Scanning) {
+            _connectionState.value = BleConnectionState.Disconnected
+        }
+    }
+
+    fun cleanup() {
+        stopScan()
+        disconnect()
     }
 }

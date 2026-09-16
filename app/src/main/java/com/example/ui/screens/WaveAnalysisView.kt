@@ -103,12 +103,15 @@ fun WaveAnalysisView(
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(200.dp)
+                        .height(210.dp)
                         .clip(RoundedCornerShape(8.dp))
                         .background(Color(0xFFFAFAFA))
                         .border(1.dp, Color(0xFFCFD8DC), RoundedCornerShape(8.dp))
                 ) {
-                    SuperimposedWaveCanvas(sampleBeats = waveAnalysis?.sampleBeats ?: emptyList())
+                    SuperimposedWaveCanvas(
+                        sampleBeats = waveAnalysis?.sampleBeats ?: emptyList(),
+                        averageMorphology = waveAnalysis?.averageMorphology
+                    )
                 }
             }
         }
@@ -287,7 +290,10 @@ private fun WaveTableRow(
 }
 
 @Composable
-private fun SuperimposedWaveCanvas(sampleBeats: List<FloatArray>) {
+private fun SuperimposedWaveCanvas(
+    sampleBeats: List<FloatArray>,
+    averageMorphology: FloatArray?
+) {
     Canvas(modifier = Modifier.fillMaxSize()) {
         val w = size.width
         val h = size.height
@@ -302,10 +308,10 @@ private fun SuperimposedWaveCanvas(sampleBeats: List<FloatArray>) {
             isAntiAlias = true
         }
 
-        // Y-axis ticks (-400, -200, 0, 200, 400, 600, 800 µV)
+        // Y-axis ticks (-400, -200, 0, 200, 400, 600, 800, 1000 µV)
         val yTicks = listOf(-400, -200, 0, 200, 400, 600, 800)
         val minUv = -400f
-        val maxUv = 800f
+        val maxUv = 900f
         val rangeUv = maxUv - minUv
 
         yTicks.forEach { tick ->
@@ -320,8 +326,13 @@ private fun SuperimposedWaveCanvas(sampleBeats: List<FloatArray>) {
             drawContext.canvas.nativeCanvas.drawText("$tick", 4f, y + 6f, paint)
         }
 
-        // Center line (0.0s time)
-        val midX = leftMargin + (0.35f * plotW)
+        // Time domain: -0.35s to +0.45s around R-peak (0.0s)
+        val timeMin = -0.35f
+        val timeMax = 0.45f
+        val timeRange = timeMax - timeMin
+
+        // Center line (0.0s time - R-peak alignment)
+        val midX = leftMargin + ((-timeMin) / timeRange) * plotW
         drawLine(
             color = Color(0xFFB0BEC5),
             start = Offset(midX, 10f),
@@ -329,92 +340,119 @@ private fun SuperimposedWaveCanvas(sampleBeats: List<FloatArray>) {
             strokeWidth = 1.2f
         )
 
-        // Draw multiple superimposed beat complexes in translucent gray
-        val numBeatsToDraw = sampleBeats.size.coerceAtLeast(15)
-        for (b in 0 until numBeatsToDraw) {
-            val path = Path()
-            val shift = (b - 7) * 0.008f
-            val baseScale = 1.0f + (b % 5) * 0.03f
+        val fs = 130f
+        if (sampleBeats.isNotEmpty()) {
+            // Plot real superimposed beats from incoming ECG stream
+            val beatsToRender = sampleBeats.takeLast(25)
+            for (beat in beatsToRender) {
+                if (beat.isEmpty()) continue
+                val halfWin = beat.size / 2
+                val path = Path()
+                var started = false
 
-            val points = listOf(
-                -0.3f to 0f,
-                -0.2f to 30f,
-                -0.14f to 85f,  // P wave
-                -0.08f to 10f,
-                -0.04f to -70f, // Q wave
-                0.0f to 680f * baseScale, // R peak
-                0.04f to -320f, // S wave
-                0.12f to 20f,
-                0.24f to 140f,  // T wave
-                0.36f to 0f
-            )
+                for (k in beat.indices) {
+                    val timeSec = (k - halfWin) / fs
+                    if (timeSec < timeMin || timeSec > timeMax) continue
+                    val fracX = (timeSec - timeMin) / timeRange
+                    val x = leftMargin + fracX * plotW
+                    val uV = beat[k] * 1000f
+                    val normY = ((uV - minUv) / rangeUv).coerceIn(0f, 1f)
+                    val y = (10f + plotH) - (normY * plotH)
 
-            points.forEachIndexed { index, (timeSec, uV) ->
-                val fracX = (timeSec + 0.35f) / 0.75f
-                val x = leftMargin + fracX * plotW
-                val normY = (uV - minUv) / rangeUv
-                val y = (10f + plotH) - (normY * plotH)
+                    if (!started) {
+                        path.moveTo(x, y)
+                        started = true
+                    } else {
+                        path.lineTo(x, y)
+                    }
+                }
 
-                if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
+                drawPath(
+                    path = path,
+                    color = Color(0xFF455A64).copy(alpha = 0.22f),
+                    style = Stroke(width = 1.6f)
+                )
             }
 
-            drawPath(
-                path = path,
-                color = Color(0xFF546E7A).copy(alpha = 0.15f),
-                style = Stroke(width = 1.6f)
+            // Plot dynamic average morphology
+            if (averageMorphology != null && averageMorphology.isNotEmpty()) {
+                val halfWin = averageMorphology.size / 2
+                val avgPath = Path()
+                var started = false
+                var pPeak = Offset(-1f, -1f)
+                var qPeak = Offset(-1f, -1f)
+                var sPeak = Offset(-1f, -1f)
+                var tPeak = Offset(-1f, -1f)
+
+                var maxP = -Float.MAX_VALUE
+                var minQ = Float.MAX_VALUE
+                var minS = Float.MAX_VALUE
+                var maxT = -Float.MAX_VALUE
+
+                for (k in averageMorphology.indices) {
+                    val timeSec = (k - halfWin) / fs
+                    if (timeSec < timeMin || timeSec > timeMax) continue
+                    val fracX = (timeSec - timeMin) / timeRange
+                    val x = leftMargin + fracX * plotW
+                    val uV = averageMorphology[k] * 1000f
+                    val normY = ((uV - minUv) / rangeUv).coerceIn(0f, 1f)
+                    val y = (10f + plotH) - (normY * plotH)
+
+                    if (!started) {
+                        avgPath.moveTo(x, y)
+                        started = true
+                    } else {
+                        avgPath.lineTo(x, y)
+                    }
+
+                    // Track fiducial points on real average morphology
+                    if (timeSec in -0.25f..-0.08f && uV > maxP) {
+                        maxP = uV
+                        pPeak = Offset(x, y)
+                    }
+                    if (timeSec in -0.08f..0.0f && uV < minQ) {
+                        minQ = uV
+                        qPeak = Offset(x, y)
+                    }
+                    if (timeSec in 0.0f..0.08f && uV < minS) {
+                        minS = uV
+                        sPeak = Offset(x, y)
+                    }
+                    if (timeSec in 0.10f..0.35f && uV > maxT) {
+                        maxT = uV
+                        tPeak = Offset(x, y)
+                    }
+                }
+
+                drawPath(
+                    path = avgPath,
+                    color = Color(0xFF1A237E),
+                    style = Stroke(width = 2.8f)
+                )
+
+                // Draw fiducial circles if found
+                if (pPeak.x >= 0) drawCircle(color = Color(0xFF5C93D1), radius = 7f, center = pPeak)
+                if (qPeak.x >= 0) drawCircle(color = Color(0xFFF3A45C), radius = 7f, center = qPeak)
+                if (sPeak.x >= 0) drawCircle(color = Color(0xFF75BF79), radius = 7f, center = sPeak)
+                if (tPeak.x >= 0) drawCircle(color = Color(0xFFD66260), radius = 7f, center = tPeak)
+            }
+        } else {
+            // Animated placeholder waiting for beats
+            val waitText = "Awaiting continuous beats from Polar H10..."
+            drawContext.canvas.nativeCanvas.drawText(
+                waitText,
+                leftMargin + 10f,
+                10f + plotH / 2f,
+                paint.apply { textSize = 26f }
             )
         }
-
-        // Draw Main Average Morphology in bolder dark gray
-        val avgPath = Path()
-        val avgPoints = listOf(
-            -0.3f to 0f,
-            -0.2f to 25f,
-            -0.14f to 90f,
-            -0.08f to 10f,
-            -0.04f to -80f,
-            0.0f to 710f,
-            0.04f to -340f,
-            0.12f to 20f,
-            0.24f to 145f,
-            0.36f to 0f
-        )
-        avgPoints.forEachIndexed { index, (timeSec, uV) ->
-            val fracX = (timeSec + 0.35f) / 0.75f
-            val x = leftMargin + fracX * plotW
-            val normY = (uV - minUv) / rangeUv
-            val y = (10f + plotH) - (normY * plotH)
-            if (index == 0) avgPath.moveTo(x, y) else avgPath.lineTo(x, y)
-        }
-        drawPath(
-            path = avgPath,
-            color = Color(0xFF263238),
-            style = Stroke(width = 2.5f)
-        )
-
-        // Draw Fiducial circles (P in blue, Q in orange, S in green, T in red)
-        val pX = leftMargin + ((-0.14f + 0.35f) / 0.75f) * plotW
-        val pY = (10f + plotH) - ((90f - minUv) / rangeUv * plotH)
-        drawCircle(color = Color(0xFF5C93D1), radius = 7f, center = Offset(pX, pY))
-
-        val qX = leftMargin + ((-0.04f + 0.35f) / 0.75f) * plotW
-        val qY = (10f + plotH) - ((-80f - minUv) / rangeUv * plotH)
-        drawCircle(color = Color(0xFFF3A45C), radius = 7f, center = Offset(qX, qY))
-
-        val sX = leftMargin + ((0.04f + 0.35f) / 0.75f) * plotW
-        val sY = (10f + plotH) - ((-340f - minUv) / rangeUv * plotH)
-        drawCircle(color = Color(0xFF75BF79), radius = 7f, center = Offset(sX, sY))
-
-        val tX = leftMargin + ((0.24f + 0.35f) / 0.75f) * plotW
-        val tY = (10f + plotH) - ((145f - minUv) / rangeUv * plotH)
-        drawCircle(color = Color(0xFFD66260), radius = 7f, center = Offset(tX, tY))
 
         // X-axis time ticks (-0.2, 0.0, 0.2, 0.4s)
         val xTicks = listOf(-0.2f, 0.0f, 0.2f, 0.4f)
         xTicks.forEach { tick ->
-            val fracX = (tick + 0.35f) / 0.75f
+            val fracX = (tick - timeMin) / timeRange
             val x = leftMargin + fracX * plotW
-            drawContext.canvas.nativeCanvas.drawText(String.format("%.1f", tick), x - 14f, h - 4f, paint)
+            drawContext.canvas.nativeCanvas.drawText(String.format("%.1f s", tick), x - 18f, h - 4f, paint.apply { textSize = 20f })
         }
     }
 }

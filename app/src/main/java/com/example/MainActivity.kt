@@ -1,9 +1,14 @@
 package com.example
 
 import android.Manifest
+import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -16,13 +21,19 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.example.ble.BleConnectionState
 import com.example.ui.AppTab
 import com.example.ui.MainViewModel
@@ -37,6 +48,24 @@ import com.example.ui.screens.PeriodicResearchView
 import com.example.ui.screens.WaveAnalysisView
 import com.example.ui.theme.ClinicalBg
 import com.example.ui.theme.MyApplicationTheme
+
+private fun Context.isIgnoringBatteryOptimizations(): Boolean {
+    val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+    return pm.isIgnoringBatteryOptimizations(packageName)
+}
+
+private fun Context.requestDisableBatteryOptimizations() {
+    try {
+        startActivity(
+            Intent(
+                Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                Uri.parse("package:$packageName")
+            )
+        )
+    } catch (e: Exception) {
+        startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+    }
+}
 
 class MainActivity : ComponentActivity() {
 
@@ -87,6 +116,49 @@ fun MainAppScreen(viewModel: MainViewModel) {
 
     var showSessionsDialog by remember { mutableStateOf(false) }
 
+    val context = LocalContext.current
+    var isIgnoringBatteryOptimizations by remember { mutableStateOf(context.isIgnoringBatteryOptimizations()) }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> {
+                    viewModel.onDisplayResumed()
+                    isIgnoringBatteryOptimizations = context.isIgnoringBatteryOptimizations()
+                }
+                Lifecycle.Event.ON_PAUSE -> viewModel.onDisplayPaused()
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    val postNotificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            viewModel.refreshHolterNotification()
+        }
+    }
+
+    val batteryPromptPrefs = remember {
+        context.getSharedPreferences("polar_holter_prefs", Context.MODE_PRIVATE)
+    }
+
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            postNotificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        if (!isIgnoringBatteryOptimizations && !batteryPromptPrefs.getBoolean("battery_opt_prompted", false)) {
+            batteryPromptPrefs.edit().putBoolean("battery_opt_prompted", true).apply()
+            context.requestDisableBatteryOptimizations()
+        }
+    }
+
     // BLE Permission Launcher for Android 12+
     val blePermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
@@ -115,7 +187,8 @@ fun MainAppScreen(viewModel: MainViewModel) {
                             blePermissionLauncher.launch(
                                 arrayOf(
                                     Manifest.permission.BLUETOOTH_SCAN,
-                                    Manifest.permission.BLUETOOTH_CONNECT
+                                    Manifest.permission.BLUETOOTH_CONNECT,
+                                    Manifest.permission.POST_NOTIFICATIONS
                                 )
                             )
                         } else {
@@ -128,6 +201,8 @@ fun MainAppScreen(viewModel: MainViewModel) {
                     viewModel.toggleRecording()
                 },
                 onToggleRecording = { viewModel.toggleRecording() },
+                isIgnoringBatteryOptimizations = isIgnoringBatteryOptimizations,
+                onRequestBatteryOptimizations = { context.requestDisableBatteryOptimizations() },
                 modifier = Modifier.statusBarsPadding()
             )
         },

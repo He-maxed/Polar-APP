@@ -3,85 +3,89 @@ package com.example.ble
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
-import android.os.Binder
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
-import com.example.model.EcgSample
-import kotlinx.coroutines.flow.SharedFlow
+import com.example.MainActivity
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+
+data class HolterTelemetry(
+    val isStreaming: Boolean = false,
+    val isRecording: Boolean = false,
+    val heartRateBpm: Int = 0,
+    val elapsedSeconds: Long = 0L
+) {
+    val requiresWakeLock: Boolean
+        get() = isStreaming || isRecording
+}
 
 /**
- * Android Service managing the Polar H10 BLE connection lifecycle,
- * background streaming, and state synchronization across app navigation.
+ * Always-on Holter guardian: keeps the app alive through deep sleep with an
+ * ongoing foreground notification and a PARTIAL_WAKE_LOCK while the sensor is
+ * streaming or a recording is active. BLE ownership lives in MainViewModel;
+ * the service only reflects telemetry pushed from there.
  */
 class PolarH10BleService : Service() {
 
-    private val binder = LocalBinder()
-    private lateinit var sdkWrapper: PolarBleSdkWrapper
-    private lateinit var nativeBleManager: PolarH10BleManager
+    private val scope = CoroutineScope(Dispatchers.Main.immediate + SupervisorJob())
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var isForeground = false
 
-    val connectionState: StateFlow<BleConnectionState>
-        get() = sdkWrapper.connectionState
-
-    val batteryLevel: StateFlow<Int>
-        get() = sdkWrapper.batteryLevel
-
-    val currentHeartRate: StateFlow<Int>
-        get() = sdkWrapper.currentHeartRate
-
-    val liveSampleFlow: SharedFlow<EcgSample>
-        get() = sdkWrapper.liveSampleFlow
-
-    inner class LocalBinder : Binder() {
-        fun getService(): PolarH10BleService = this@PolarH10BleService
-    }
+    override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
-        sdkWrapper = PolarBleSdkWrapper(this)
-        nativeBleManager = PolarH10BleManager(this)
+        currentService = this
         createNotificationChannel()
-    }
-
-    override fun onBind(intent: Intent?): IBinder {
-        return binder
+        scope.launch {
+            telemetry.collect { t ->
+                updateWakeLock(t.requiresWakeLock)
+                if (isForeground) {
+                    notificationManager.notify(NOTIFICATION_ID, buildNotification(t))
+                }
+            }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
-            ACTION_START_FOREGROUND -> startRecordingForeground()
-            ACTION_STOP_FOREGROUND -> stopRecordingForeground()
+        if (intent?.action == ACTION_STOP_FOREGROUND) {
+            stopForegroundInternal()
+            stopSelf()
+            return START_NOT_STICKY
         }
+        startInForeground()
         return START_STICKY
     }
 
-    fun startDeviceDiscovery() {
-        sdkWrapper.startDiscovery()
+    private fun startInForeground() {
+        val notification = buildNotification(telemetry.value)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+        isForeground = true
     }
 
-    fun stopDeviceDiscovery() {
-        sdkWrapper.stopDiscovery()
-    }
-
-    fun connect(deviceId: String) {
-        sdkWrapper.connect(deviceId)
-    }
-
-    fun disconnect() {
-        sdkWrapper.disconnect()
-        nativeBleManager.disconnect()
-    }
-
-    fun startRecordingForeground() {
-        val notification = buildNotification("Recording ECG Stream", "Polar H10 active")
-        startForeground(NOTIFICATION_ID, notification)
-    }
-
-    fun stopRecordingForeground() {
+    private fun stopForegroundInternal() {
+        isForeground = false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE)
         } else {
@@ -90,40 +94,96 @@ class PolarH10BleService : Service() {
         }
     }
 
+    private fun renderNotification() {
+        if (isForeground) {
+            notificationManager.notify(NOTIFICATION_ID, buildNotification(telemetry.value))
+        }
+    }
+
+    private fun updateWakeLock(needed: Boolean) {
+        if (needed && wakeLock == null) {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "PolarEcg:H10HolterWakeLock").apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        } else if (!needed && wakeLock != null) {
+            wakeLock?.release()
+            wakeLock = null
+        }
+    }
+
+    private val notificationManager: NotificationManager
+        get() = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "Polar ECG Monitoring Service",
+                "Polar ECG Holter Service",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Monitors real-time Polar H10 telemetry and ECG recordings"
+                description = "Keeps the Polar H10 Holter recording through deep sleep"
             }
-            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
-            manager?.createNotificationChannel(channel)
+            notificationManager.createNotificationChannel(channel)
         }
     }
 
-    private fun buildNotification(title: String, content: String): Notification {
+    private fun buildNotification(t: HolterTelemetry): Notification {
+        val contentText = when {
+            t.isRecording && t.isStreaming -> "Recording in Deep Sleep \u2022 ${t.heartRateBpm} bpm"
+            t.isStreaming -> "Streaming live ECG \u2022 ${t.heartRateBpm} bpm"
+            t.isRecording -> "Recording in Deep Sleep \u2022 No sensor"
+            else -> "Ready \u2022 Monitoring standby"
+        }
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle(title)
-            .setContentText(content)
+            .setContentTitle("Polar H10 Holter Active")
+            .setContentText(contentText)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(contentText))
             .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setOnlyAlertOnce(true)
+            .setSilent(true)
+            .setContentIntent(
+                PendingIntent.getActivity(
+                    this,
+                    0,
+                    Intent(this, MainActivity::class.java),
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+            )
             .build()
     }
 
     override fun onDestroy() {
-        sdkWrapper.cleanup()
-        nativeBleManager.disconnect()
+        teardown()
         super.onDestroy()
     }
 
+    private fun teardown() {
+        scope.cancel()
+        updateWakeLock(false)
+        if (currentService === this) {
+            currentService = null
+        }
+    }
+
     companion object {
-        const val ACTION_START_FOREGROUND = "com.example.ble.ACTION_START_FOREGROUND"
         const val ACTION_STOP_FOREGROUND = "com.example.ble.ACTION_STOP_FOREGROUND"
-        private const val CHANNEL_ID = "polar_ecg_service_channel"
+        private const val CHANNEL_ID = "polar_ecg_holter_service_channel"
         private const val NOTIFICATION_ID = 1001
+
+        @Volatile
+        private var currentService: PolarH10BleService? = null
+
+        private val _telemetry = MutableStateFlow(HolterTelemetry())
+        val telemetry: StateFlow<HolterTelemetry> = _telemetry.asStateFlow()
+
+        fun updateTelemetry(update: HolterTelemetry) {
+            _telemetry.value = update
+            currentService?.renderNotification()
+        }
     }
 }

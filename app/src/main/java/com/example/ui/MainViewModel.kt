@@ -1,9 +1,13 @@
 package com.example.ui
 
 import android.app.Application
+import android.content.Intent
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.ble.BleConnectionState
+import com.example.ble.HolterTelemetry
+import com.example.ble.PolarH10BleService
 import com.example.ble.PolarBleSdkWrapper
 import com.example.ble.PolarH10BleManager
 import com.example.data.AppDatabase
@@ -26,11 +30,16 @@ import com.example.model.WaveAnalysisResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
@@ -40,6 +49,10 @@ import java.util.Date
 import java.util.Locale
 import java.util.UUID
 import kotlin.math.roundToInt
+
+private const val DISPLAY_FRAME_INTERVAL_MS = 66L
+
+private data class LiveDisplayFrame(val buffer: FloatArray)
 
 enum class AppTab(val title: String) {
     PERIODIC("Analyze"),
@@ -173,12 +186,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _activityData = MutableStateFlow<PhysicalActivityData?>(null)
     val activityData: StateFlow<PhysicalActivityData?> = _activityData.asStateFlow()
 
-    // Live streaming circular buffer for Oscilloscope (130 Hz, 60 seconds capacity = 7800 points)
     private val bufferSize = 7800
     private val _liveOscilloscopeBuffer = MutableStateFlow(FloatArray(bufferSize))
     val liveOscilloscopeBuffer: StateFlow<FloatArray> = _liveOscilloscopeBuffer.asStateFlow()
-    private val tempLiveArray = FloatArray(bufferSize)
-    private var writeHead = 0
+
+    private val displayHistory = ArrayDeque<Float>(bufferSize)
+    private val displayHistoryLock = Any()
+    private var lastDisplayFrameTimeMs = 0L
+    @Volatile
+    private var isDisplayFlowSuspended = false
+    private val _liveDisplayFrames = MutableSharedFlow<LiveDisplayFrame>(
+        replay = 1,
+        extraBufferCapacity = 4,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
+    private val liveDisplayFrames: SharedFlow<LiveDisplayFrame> = _liveDisplayFrames.asSharedFlow()
 
     private val _isLivePaused = MutableStateFlow(false)
     val isLivePaused: StateFlow<Boolean> = _isLivePaused.asStateFlow()
@@ -197,22 +219,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var lastHrRecordTimeMs = 0L
 
     init {
-        // Collect real incoming BLE samples from both Polar BLE SDK and native BLE driver
+        // Storage pipeline: HR history, recording accumulation, continuous Room flush (decoupled from UI)
         viewModelScope.launch(Dispatchers.Default) {
             merge(polarSdkWrapper.liveSampleFlow, bleManager.liveSampleFlow).collect { sample ->
                 val hr = currentHeartRate.value
                 val now = sample.timestampMs
 
                 synchronized(sampleLock) {
-                    if (!_isLivePaused.value) {
-                        tempLiveArray[writeHead] = sample.filteredMv
-                        writeHead = (writeHead + 1) % bufferSize
-                        if (writeHead % 5 == 0) {
-                            _liveOscilloscopeBuffer.value = tempLiveArray.clone()
-                        }
-                    }
-
-                    // Record HR point every 2 seconds if valid HR or estimate
                     if (now - lastHrRecordTimeMs >= 2000L) {
                         lastHrRecordTimeMs = now
                         val effectiveHr = if (hr > 0) hr else 72
@@ -229,12 +242,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         recordedTimestamps.add(sample.timestampMs)
                         continuousDbBuffer.add(sample)
 
-                        // Update session bounds
                         _detailViewState.value = _detailViewState.value.copy(
                             sessionEndTimeMs = now
                         )
 
-                        // Flush 1-second chunks (130 samples) continuously to Room to prevent any data loss
                         if (continuousDbBuffer.size >= 130) {
                             flushBufferToRoom()
                         }
@@ -243,8 +254,51 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-        // Run continuous real-time analysis loop for Wave Analysis and Periodic Research
+        // Display pipeline: DROP_OLDEST ring throttled into replay frames, never blocked by Room writes
+        viewModelScope.launch(Dispatchers.Default) {
+            merge(polarSdkWrapper.liveSampleFlow, bleManager.liveSampleFlow).collect { sample ->
+                synchronized(displayHistoryLock) {
+                    if (displayHistory.size >= bufferSize) {
+                        displayHistory.removeFirst()
+                    }
+                    displayHistory.addLast(sample.filteredMv)
+                }
+                val now = System.currentTimeMillis()
+                if (!isDisplayFlowSuspended && !_isLivePaused.value && now - lastDisplayFrameTimeMs >= DISPLAY_FRAME_INTERVAL_MS) {
+                    lastDisplayFrameTimeMs = now
+                    emitLatestDisplayFrame()
+                }
+            }
+        }
+
+        // Main-thread bridge: pushes the latest replay frame into the oscilloscope buffer
+        viewModelScope.launch(Dispatchers.Main.immediate) {
+            liveDisplayFrames.collect { frame ->
+                _liveOscilloscopeBuffer.value = frame.buffer
+            }
+        }
+
+        // Telemetry relay: pushes live status into the always-on Holter foreground service
+        viewModelScope.launch(Dispatchers.Default) {
+            combine(
+                connectionState,
+                isRecording,
+                currentHeartRate,
+                recordingDurationSeconds
+            ) { state, recording, hr, elapsed ->
+                HolterTelemetry(
+                    isStreaming = state is BleConnectionState.Connected,
+                    isRecording = recording,
+                    heartRateBpm = hr,
+                    elapsedSeconds = elapsed
+                )
+            }.distinctUntilChanged().collect { t ->
+                PolarH10BleService.updateTelemetry(t)
+            }
+        }
+
         startPeriodicAnalysisLoop()
+        startHolterService()
     }
 
     private fun startPeriodicAnalysisLoop() {
@@ -260,13 +314,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 recordedCorrectedSamples.subList(start, recordedCorrectedSamples.size).toFloatArray(),
                                 recordedTimestamps.subList(start, recordedTimestamps.size).toLongArray()
                             )
-                        } else if (writeHead >= 260) {
-                            Pair(
-                                tempLiveArray.takeLast(1300).toFloatArray(),
-                                LongArray(1300) { System.currentTimeMillis() - (1300 - 1 - it) * 8L }
-                            )
                         } else {
-                            Pair(FloatArray(0), LongArray(0))
+                            synchronized(displayHistoryLock) {
+                                if (displayHistory.size >= 260) {
+                                    val count = displayHistory.size.coerceAtMost(1300)
+                                    val base = System.currentTimeMillis()
+                                    val list = displayHistory.toList()
+                                    Pair(
+                                        list.takeLast(count).toFloatArray(),
+                                        LongArray(count) { base - (count - 1 - it) * 8L }
+                                    )
+                                } else {
+                                    Pair(FloatArray(0), LongArray(0))
+                                }
+                            }
                         }
                     }
 
@@ -615,7 +676,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val tms = recordedTimestamps.subList(startIdx, endIdx).toLongArray()
                 Triple(raw, corr, tms)
             } else {
-                val corr = tempLiveArray.clone()
+                val corr = synchronized(displayHistoryLock) {
+                    displayHistory.toList().toFloatArray()
+                }
                 val raw = corr.clone()
                 val tms = LongArray(corr.size) { System.currentTimeMillis() - (corr.size - 1 - it) * 8L }
                 Triple(raw, corr, tms)
@@ -657,10 +720,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         recordedTimestamps.subList(start, recordedTimestamps.size).toLongArray()
                     )
                 } else {
-                    Pair(
-                        tempLiveArray.takeLast(1300).toFloatArray(),
-                        LongArray(1300) { System.currentTimeMillis() - (1300 - 1 - it) * 8L }
-                    )
+                    synchronized(displayHistoryLock) {
+                        val list = displayHistory.toList()
+                        Pair(
+                            list.takeLast(1300).toFloatArray(),
+                            LongArray(1300) { System.currentTimeMillis() - (1300 - 1 - it) * 8L }
+                        )
+                    }
                 }
             }
 
@@ -690,10 +756,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         recordedTimestamps.toLongArray()
                     )
                 } else {
+                    val arr = synchronized(displayHistoryLock) {
+                        displayHistory.toList().toFloatArray()
+                    }
                     Triple(
-                        tempLiveArray.clone(),
-                        tempLiveArray.clone(),
-                        LongArray(tempLiveArray.size) { System.currentTimeMillis() - (tempLiveArray.size - 1 - it) * 8L }
+                        arr,
+                        arr.clone(),
+                        LongArray(arr.size) { System.currentTimeMillis() - (arr.size - 1 - it) * 8L }
                     )
                 }
             }
@@ -749,7 +818,48 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return sdf.format(date)
     }
 
+    fun onDisplayResumed() {
+        isDisplayFlowSuspended = false
+        emitLatestDisplayFrame()
+    }
+
+    fun onDisplayPaused() {
+        isDisplayFlowSuspended = true
+    }
+
+    fun refreshHolterNotification() {
+        PolarH10BleService.updateTelemetry(PolarH10BleService.telemetry.value)
+    }
+
+    private fun buildLatestDisplayFrame(): FloatArray {
+        val snapshot: List<Float> = synchronized(displayHistoryLock) {
+            displayHistory.toList()
+        }
+        val buffer = FloatArray(bufferSize)
+        val n = snapshot.size.coerceAtMost(bufferSize)
+        val offset = bufferSize - n
+        for (i in 0 until n) {
+            buffer[offset + i] = snapshot[snapshot.size - n + i]
+        }
+        return buffer
+    }
+
+    private fun emitLatestDisplayFrame() {
+        _liveDisplayFrames.tryEmit(LiveDisplayFrame(buildLatestDisplayFrame()))
+    }
+
+    fun startHolterService() {
+        try {
+            val context = getApplication<Application>()
+            val intent = Intent(context, PolarH10BleService::class.java)
+            ContextCompat.startForegroundService(context, intent)
+        } catch (e: Exception) {
+            android.util.Log.e("MainViewModel", "Failed to start Holter service: ${e.message}")
+        }
+    }
+
     override fun onCleared() {
+        PolarH10BleService.updateTelemetry(HolterTelemetry())
         polarSdkWrapper.cleanup()
         bleManager.cleanup()
         super.onCleared()

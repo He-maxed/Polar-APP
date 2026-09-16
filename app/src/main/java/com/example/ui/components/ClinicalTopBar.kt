@@ -65,6 +65,8 @@ fun ClinicalTopBar(
     onOpenRecordings: () -> Unit,
     onNewDetection: () -> Unit,
     onToggleRecording: () -> Unit,
+    isIgnoringBatteryOptimizations: Boolean,
+    onRequestBatteryOptimizations: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     var showStopConfirmationDialog by remember { mutableStateOf(false) }
@@ -236,6 +238,31 @@ fun ClinicalTopBar(
                 label = "Analyze",
                 onClick = onNewDetection,
                 testTag = "topbar_btn_analyze"
+            )
+
+            // Battery optimization (deep-sleep survival)
+            TopActionItem(
+                icon = {
+                    Box(contentAlignment = Alignment.TopEnd) {
+                        Icon(
+                            imageVector = Icons.Outlined.BatteryFull,
+                            contentDescription = "Battery Optimization",
+                            tint = if (isIgnoringBatteryOptimizations) MedicalGreen else MedicalRed,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        if (!isIgnoringBatteryOptimizations) {
+                            Box(
+                                modifier = Modifier
+                                    .size(7.dp)
+                                    .clip(CircleShape)
+                                    .background(MedicalRed)
+                            )
+                        }
+                    }
+                },
+                label = if (isIgnoringBatteryOptimizations) "Battery OK" else "Battery Lock",
+                onClick = onRequestBatteryOptimizations,
+                testTag = "topbar_btn_battery_optimization"
             )
         }
 

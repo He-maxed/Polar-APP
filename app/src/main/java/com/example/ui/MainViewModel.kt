@@ -1,7 +1,10 @@
 package com.example.ui
 
 import android.app.Application
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -851,6 +854,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun startHolterService() {
         try {
             val context = getApplication<Application>()
+            val canStart = Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
+                ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+            if (!canStart) return
+
             val intent = Intent(context, PolarH10BleService::class.java)
             ContextCompat.startForegroundService(context, intent)
         } catch (e: Exception) {

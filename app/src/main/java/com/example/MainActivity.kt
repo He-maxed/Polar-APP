@@ -139,6 +139,7 @@ fun MainAppScreen(viewModel: MainViewModel) {
         contract = ActivityResultContracts.RequestPermission()
     ) { granted ->
         if (granted) {
+            viewModel.startHolterService()
             viewModel.refreshHolterNotification()
         }
     }
@@ -165,6 +166,7 @@ fun MainAppScreen(viewModel: MainViewModel) {
     ) { permissions ->
         val allGranted = permissions.values.all { it }
         if (allGranted) {
+            viewModel.startHolterService()
             viewModel.startScan()
         }
     }

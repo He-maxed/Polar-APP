@@ -145,7 +145,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (!_isLivePaused.value) {
                     tempLiveArray[writeHead] = sample.filteredMv
                     writeHead = (writeHead + 1) % bufferSize
-                    _liveOscilloscopeBuffer.value = tempLiveArray.clone()
+                    if (writeHead % 4 == 0) {
+                        _liveOscilloscopeBuffer.value = tempLiveArray.clone()
+                    }
                 }
 
                 if (_isRecording.value) {

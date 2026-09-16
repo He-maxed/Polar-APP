@@ -1,0 +1,26 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Outer Clinical Heart Silhouette -->
+    <path
+        android:fillColor="#152B3C"
+        android:strokeColor="#00E5FF"
+        android:strokeWidth="2"
+        android:pathData="M54,82 C54,82 26,62 26,42 C26,30 35,22 45,22 C50,22 53,25 54,27 C55,25 58,22 63,22 C73,22 82,30 82,42 C82,62 54,82 54,82 Z" />
+
+    <!-- Clinical ECG Trace: P wave, Q drop, tall R peak, deep S drop, T wave -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#39FF8F"
+        android:strokeWidth="2.7"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M24,52 L36,52 Q40,47 43,52 L47,52 L49,56 L53,30 L57,66 L60,52 L65,52 Q69,45 74,52 L84,52" />
+
+    <!-- Diagnostic R-peak marker dot -->
+    <path
+        android:fillColor="#FF3B30"
+        android:pathData="M53,28 A2.5,2.5 0 1,1 53,33 A2.5,2.5 0 1,1 53,28 Z" />
+</vector>

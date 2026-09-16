@@ -1,0 +1,6 @@
+{
+  "name": "Polar ECG Clinical",
+  "description": "Clinical-grade Polar H10 electrophysiology & cardiology diagnostic workstation with real-time BLE streaming, Holter recording, extrasystole detection (VEB/SVEB couplets, bigeminy), wave analysis (P-Q-R-S-T intervals), HRV, and EDR.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

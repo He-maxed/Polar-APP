@@ -5,8 +5,8 @@ import com.example.model.PhysicalActivityData
 object ActivityProcessor {
 
     /**
-     * Processes Polar ACC accelerometer samples (X, Y, Z mg) to compute step count,
-     * velocity (km/h), cadence (/min), and correlates with extrasystole burden by heart rate zones.
+     * Processes Polar ACC accelerometer samples (X, Y, Z in mg/g) to compute step count,
+     * distance, velocity (km/h), cadence (/min), and extrasystole zone distribution.
      */
     fun process(
         accelMag: FloatArray,
@@ -14,8 +14,17 @@ object ActivityProcessor {
         svebCount: Int,
         vebCount: Int
     ): PhysicalActivityData {
-        if (accelMag.size < 4) {
-            return fallbackActivity()
+        if (accelMag.size < 4 || timestampsMs.isEmpty()) {
+            return PhysicalActivityData(
+                steps = 0,
+                distanceMeters = 0,
+                currentVelocityKmh = 0f,
+                averageCadenceRpm = 0,
+                velocityTimeSeries = emptyList(),
+                cadenceTimeSeries = emptyList(),
+                extrasystoleRestPercent = 0,
+                extrasystoleRecoveryPercent = 0
+            )
         }
 
         // 1. Peak detection in acceleration magnitude for steps
@@ -29,12 +38,12 @@ object ActivityProcessor {
 
         val totalDurationHours = if (timestampsMs.size > 1) {
             (timestampsMs.last() - timestampsMs.first()) / 3600000f
-        } else 1.3f
+        } else 0f
 
         val strideLengthMeters = 0.75f
         val distanceMeters = (steps * strideLengthMeters).toInt()
-        val velocityKmh = if (totalDurationHours > 0) (distanceMeters / 1000f) / totalDurationHours else 3.89f
-        val cadence = if (totalDurationHours > 0) (steps / (totalDurationHours * 60f)).toInt() else 78
+        val velocityKmh = if (totalDurationHours > 0) (distanceMeters / 1000f) / totalDurationHours else 0f
+        val cadence = if (totalDurationHours > 0) (steps / (totalDurationHours * 60f)).toInt() else 0
 
         // Velocity & Cadence time series for chart
         val velSeries = ArrayList<Pair<Long, Float>>()
@@ -52,7 +61,6 @@ object ActivityProcessor {
                 }
             }
 
-            // Proportionally interpolate timestamp based on index ratio to safely prevent out of bounds
             val t = if (timestampsMs.isNotEmpty()) {
                 val tIdx = ((idx.toFloat() / accelMag.size.toFloat()) * (timestampsMs.size - 1))
                     .toInt()
@@ -65,51 +73,24 @@ object ActivityProcessor {
             val chunkMinutes = 2.5f
             val localCadence = (chunkSteps / chunkMinutes) * 60f
             val localVel = (chunkSteps * strideLengthMeters / 1000f) / (chunkMinutes / 60f)
-            velSeries.add(Pair(t, localVel.coerceIn(0f, 9f)))
-            cadSeries.add(Pair(t, localCadence.coerceIn(0f, 130f)))
+            velSeries.add(Pair(t, localVel.coerceIn(0f, 15f)))
+            cadSeries.add(Pair(t, localCadence.coerceIn(0f, 160f)))
             idx += chunkSize
         }
 
-        val totalExtrasystoles = (svebCount + vebCount).coerceAtLeast(1)
-        val restPercent = 68
-        val recoveryPercent = 32
+        val totalExtrasystoles = svebCount + vebCount
+        val restPercent = if (totalExtrasystoles > 0) ((vebCount.toFloat() / totalExtrasystoles.toFloat()) * 100).toInt() else 0
+        val recoveryPercent = if (totalExtrasystoles > 0) 100 - restPercent else 0
 
         return PhysicalActivityData(
-            steps = steps.coerceAtLeast(1200),
-            distanceMeters = distanceMeters.coerceAtLeast(950),
+            steps = steps,
+            distanceMeters = distanceMeters,
             currentVelocityKmh = velocityKmh,
             averageCadenceRpm = cadence,
-            velocityTimeSeries = if (velSeries.isNotEmpty()) velSeries else fallbackActivity().velocityTimeSeries,
-            cadenceTimeSeries = if (cadSeries.isNotEmpty()) cadSeries else fallbackActivity().cadenceTimeSeries,
+            velocityTimeSeries = velSeries,
+            cadenceTimeSeries = cadSeries,
             extrasystoleRestPercent = restPercent,
             extrasystoleRecoveryPercent = recoveryPercent
-        )
-    }
-
-    private fun fallbackActivity(): PhysicalActivityData {
-        val now = System.currentTimeMillis()
-        val startTime = now - (78 * 60 * 1000L) // 1h 18m
-        val velList = ArrayList<Pair<Long, Float>>()
-        val cadList = ArrayList<Pair<Long, Float>>()
-
-        for (i in 0..30) {
-            val t = startTime + (i * 150000L)
-            val isRest = i in 18..24
-            val v = if (isRest) 4.2f + (i % 3) * 0.4f else 6.8f + (i % 4) * 0.2f
-            val c = if (isRest) 52f + (i % 5) * 4f else 82f + (i % 6) * 3f
-            velList.add(Pair(t, v))
-            cadList.add(Pair(t, c))
-        }
-
-        return PhysicalActivityData(
-            steps = 6833,
-            distanceMeters = 5169,
-            currentVelocityKmh = 3.89f,
-            averageCadenceRpm = 76,
-            velocityTimeSeries = velList,
-            cadenceTimeSeries = cadList,
-            extrasystoleRestPercent = 68,
-            extrasystoleRecoveryPercent = 32
         )
     }
 }

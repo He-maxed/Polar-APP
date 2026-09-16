@@ -16,20 +16,17 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
-import com.example.dsp.ClinicalDatasetGenerator
 import com.example.dsp.EcgFilter
 import com.example.model.EcgSample
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.UUID
 
@@ -37,7 +34,7 @@ sealed class BleConnectionState {
     object Disconnected : BleConnectionState()
     object Scanning : BleConnectionState()
     data class Connecting(val deviceName: String) : BleConnectionState()
-    data class Connected(val deviceName: String, val isSimulated: Boolean = false) : BleConnectionState()
+    data class Connected(val deviceName: String) : BleConnectionState()
     data class Error(val message: String) : BleConnectionState()
 }
 
@@ -48,10 +45,10 @@ class PolarH10BleManager(private val context: Context) {
     private val _connectionState = MutableStateFlow<BleConnectionState>(BleConnectionState.Disconnected)
     val connectionState: StateFlow<BleConnectionState> = _connectionState.asStateFlow()
 
-    private val _batteryLevel = MutableStateFlow(100)
+    private val _batteryLevel = MutableStateFlow(0)
     val batteryLevel: StateFlow<Int> = _batteryLevel.asStateFlow()
 
-    private val _currentHeartRate = MutableStateFlow(73)
+    private val _currentHeartRate = MutableStateFlow(0)
     val currentHeartRate: StateFlow<Int> = _currentHeartRate.asStateFlow()
 
     private val _liveSampleFlow = MutableSharedFlow<EcgSample>(replay = 50)
@@ -62,7 +59,6 @@ class PolarH10BleManager(private val context: Context) {
 
     private var bluetoothGatt: BluetoothGatt? = null
     private val liveFilter = EcgFilter.LiveFilter(130f, 0.5f)
-    private var simulationJob: Job? = null
 
     companion object {
         private const val TAG = "PolarH10Ble"
@@ -82,14 +78,14 @@ class PolarH10BleManager(private val context: Context) {
     @SuppressLint("MissingPermission")
     fun startScan() {
         if (bluetoothAdapter == null || !bluetoothAdapter.isEnabled) {
-            startSimulationMode("Polar H10 (Clinical Stream)")
+            _connectionState.value = BleConnectionState.Error("Bluetooth is disabled. Please turn on Bluetooth to connect Polar H10.")
             return
         }
 
         try {
             val scanner = bluetoothAdapter.bluetoothLeScanner
             if (scanner == null) {
-                startSimulationMode("Polar H10 (Clinical Stream)")
+                _connectionState.value = BleConnectionState.Error("BLE scanner unavailable on this device.")
                 return
             }
 
@@ -103,7 +99,9 @@ class PolarH10BleManager(private val context: Context) {
                         if (name.contains("Polar", ignoreCase = true) || name.contains("H10", ignoreCase = true)) {
                             if (!foundList.any { it.address == device.address }) {
                                 foundList.add(device)
-                                _availableDevices.value = foundList.toList()
+                                _availableDevices.value = ArrayList(foundList)
+                                // Auto-connect to first Polar device found
+                                scanner.stopScan(this)
                                 connectDevice(device)
                             }
                         }
@@ -111,89 +109,128 @@ class PolarH10BleManager(private val context: Context) {
                 }
 
                 override fun onScanFailed(errorCode: Int) {
-                    Log.w(TAG, "Scan failed with error $errorCode, starting Clinical Simulation Stream")
-                    startSimulationMode("Polar H10 (Clinical Stream)")
+                    _connectionState.value = BleConnectionState.Error("BLE scan failed with code $errorCode")
                 }
             }
 
             scanner.startScan(scanCallback)
-            // Timeout scan after 6s and fallback to simulation if no hardware device found
+
+            // Stop scanning after 15 seconds if nothing found
             Handler(Looper.getMainLooper()).postDelayed({
-                if (_connectionState.value is BleConnectionState.Scanning) {
-                    try {
-                        scanner.stopScan(scanCallback)
-                    } catch (_: Exception) {}
-                    if (foundList.isEmpty()) {
-                        startSimulationMode("Polar H10 (Clinical Stream)")
+                try {
+                    scanner.stopScan(scanCallback)
+                    if (_connectionState.value is BleConnectionState.Scanning) {
+                        _connectionState.value = BleConnectionState.Error("No Polar H10 device found. Ensure sensor is on your chest and moisten electrodes.")
                     }
-                }
-            }, 6000)
+                } catch (_: Exception) {}
+            }, 15000L)
 
         } catch (e: Exception) {
-            Log.e(TAG, "Bluetooth scan exception", e)
-            startSimulationMode("Polar H10 (Clinical Stream)")
+            _connectionState.value = BleConnectionState.Error("BLE scan exception: ${e.localizedMessage}")
         }
     }
 
     @SuppressLint("MissingPermission")
     fun connectDevice(device: BluetoothDevice) {
-        stopSimulation()
         _connectionState.value = BleConnectionState.Connecting(device.name ?: "Polar H10")
-
-        bluetoothGatt = device.connectGatt(context, false, object : BluetoothGattCallback() {
-            override fun onConnectionStateChange(gatt: BluetoothGatt?, status: Int, newState: Int) {
-                if (newState == BluetoothProfile.STATE_CONNECTED) {
-                    _connectionState.value = BleConnectionState.Connected(device.name ?: "Polar H10", isSimulated = false)
-                    gatt?.discoverServices()
-                } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                    _connectionState.value = BleConnectionState.Disconnected
-                }
-            }
-
-            override fun onServicesDiscovered(gatt: BluetoothGatt?, status: Int) {
-                if (status == BluetoothGatt.GATT_SUCCESS && gatt != null) {
-                    setupPmdStreaming(gatt)
-                }
-            }
-
-            override fun onCharacteristicChanged(gatt: BluetoothGatt?, characteristic: BluetoothGattCharacteristic?) {
-                characteristic ?: return
-                when (characteristic.uuid) {
-                    HR_MEASUREMENT_CHAR -> parseHrData(characteristic.value)
-                    BATTERY_LEVEL_CHAR -> {
-                        val level = characteristic.value?.firstOrNull()?.toInt() ?: 100
-                        _batteryLevel.value = level
-                    }
-                    PMD_DATA_CHAR -> parsePmdEcgData(characteristic.value)
-                }
-            }
-        })
+        bluetoothGatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
     }
 
-    @SuppressLint("MissingPermission")
-    private fun setupPmdStreaming(gatt: BluetoothGatt) {
-        val pmdService = gatt.getService(PMD_SERVICE_UUID)
-        if (pmdService != null) {
-            val dataChar = pmdService.getCharacteristic(PMD_DATA_CHAR)
-            if (dataChar != null) {
-                gatt.setCharacteristicNotification(dataChar, true)
-                val descriptor = dataChar.getDescriptor(CCCD_UUID)
-                descriptor?.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                gatt.writeDescriptor(descriptor)
+    private val gattCallback = object : BluetoothGattCallback() {
+        @SuppressLint("MissingPermission")
+        override fun onConnectionStateChange(gatt: BluetoothGatt?, status: Int, newState: Int) {
+            if (newState == BluetoothProfile.STATE_CONNECTED) {
+                Log.d(TAG, "Connected to GATT server.")
+                _connectionState.value = BleConnectionState.Connected(gatt?.device?.name ?: "Polar H10")
+                gatt?.discoverServices()
+            } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                Log.d(TAG, "Disconnected from GATT server.")
+                _connectionState.value = BleConnectionState.Disconnected
+                bluetoothGatt = null
             }
+        }
 
-            // Start streaming command to PMD Control: Type 0x00 (ECG), 130Hz
-            val ctrlChar = pmdService.getCharacteristic(PMD_CONTROL_CHAR)
-            if (ctrlChar != null) {
-                // 0x02 = START, 0x00 = ECG, 0x00 0x01 0x82 0x00 = 130Hz, 0x01 0x01 0x0E 0x00 = 14-bit
-                val startEcgCmd = byteArrayOf(0x02, 0x00, 0x00, 0x01, 0x82.toByte(), 0x00, 0x01, 0x01, 0x0E, 0x00)
-                ctrlChar.value = startEcgCmd
-                gatt.writeCharacteristic(ctrlChar)
+        @SuppressLint("MissingPermission")
+        override fun onServicesDiscovered(gatt: BluetoothGatt?, status: Int) {
+            if (status == BluetoothGatt.GATT_SUCCESS && gatt != null) {
+                // 1. Enable notifications for Heart Rate Service
+                val hrService = gatt.getService(HR_SERVICE_UUID)
+                val hrChar = hrService?.getCharacteristic(HR_MEASUREMENT_CHAR)
+                if (hrChar != null) {
+                    gatt.setCharacteristicNotification(hrChar, true)
+                    val descriptor = hrChar.getDescriptor(CCCD_UUID)
+                    descriptor?.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                    gatt.writeDescriptor(descriptor)
+                }
+
+                // 2. Read Battery Service
+                val batService = gatt.getService(BATTERY_SERVICE_UUID)
+                val batChar = batService?.getCharacteristic(BATTERY_LEVEL_CHAR)
+                if (batChar != null) {
+                    gatt.readCharacteristic(batChar)
+                }
+
+                // 3. Start Polar PMD ECG Streaming (130Hz, 14-bit, 1 channel)
+                enablePolarPmdStream(gatt)
+            }
+        }
+
+        @Suppress("DEPRECATION")
+        @Deprecated("Deprecated in Java")
+        override fun onCharacteristicChanged(
+            gatt: BluetoothGatt?,
+            characteristic: BluetoothGattCharacteristic?
+        ) {
+            if (characteristic == null) return
+            when (characteristic.uuid) {
+                HR_MEASUREMENT_CHAR -> parseHeartRateData(characteristic.value)
+                PMD_DATA_CHAR -> parsePmdEcgData(characteristic.value)
+            }
+        }
+
+        @Suppress("DEPRECATION")
+        @Deprecated("Deprecated in Java")
+        override fun onCharacteristicRead(
+            gatt: BluetoothGatt?,
+            characteristic: BluetoothGattCharacteristic?,
+            status: Int
+        ) {
+            if (status == BluetoothGatt.GATT_SUCCESS && characteristic != null) {
+                if (characteristic.uuid == BATTERY_LEVEL_CHAR) {
+                    val battery = characteristic.value?.firstOrNull()?.toInt() ?: 100
+                    _batteryLevel.value = battery
+                }
             }
         }
     }
 
-    private fun parseHrData(data: ByteArray?) {
+    @SuppressLint("MissingPermission")
+    @Suppress("DEPRECATION")
+    private fun enablePolarPmdStream(gatt: BluetoothGatt) {
+        val pmdService = gatt.getService(PMD_SERVICE_UUID) ?: return
+        val pmdControlChar = pmdService.getCharacteristic(PMD_CONTROL_CHAR) ?: return
+        val pmdDataChar = pmdService.getCharacteristic(PMD_DATA_CHAR) ?: return
+
+        // Enable PMD data notifications
+        gatt.setCharacteristicNotification(pmdDataChar, true)
+        val descriptor = pmdDataChar.getDescriptor(CCCD_UUID)
+        if (descriptor != null) {
+            descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+            gatt.writeDescriptor(descriptor)
+        }
+
+        // Send start ECG streaming command:
+        // OpCode 0x02 (start), Measurement type 0x00 (ECG), Array size 0x01,
+        // Setting 0x00 (sample rate), array size 0x01, Value 0x0082 (130 Hz in little endian),
+        // Setting 0x01 (resolution), array size 0x01, Value 0x000E (14 bit)
+        val startEcgCmd = byteArrayOf(
+            0x02, 0x00, 0x00, 0x01, 0x82.toByte(), 0x00, 0x01, 0x01, 0x0E, 0x00
+        )
+        pmdControlChar.value = startEcgCmd
+        gatt.writeCharacteristic(pmdControlChar)
+    }
+
+    private fun parseHeartRateData(data: ByteArray?) {
         if (data == null || data.isEmpty()) return
         val flags = data[0].toInt()
         val is16Bit = (flags and 0x01) != 0
@@ -201,7 +238,7 @@ class PolarH10BleManager(private val context: Context) {
             (data[1].toInt() and 0xFF) or ((data[2].toInt() and 0xFF) shl 8)
         } else if (data.size > 1) {
             data[1].toInt() and 0xFF
-        } else 73
+        } else 0
         _currentHeartRate.value = hr
     }
 
@@ -225,50 +262,15 @@ class PolarH10BleManager(private val context: Context) {
         }
     }
 
-    fun startSimulationMode(deviceName: String = "Polar H10 (Clinical Stream)") {
-        stopSimulation()
-        _connectionState.value = BleConnectionState.Connected(deviceName, isSimulated = true)
-        _batteryLevel.value = 100
-        _currentHeartRate.value = 73
-
-        simulationJob = scope.launch {
-            val waveform = ClinicalDatasetGenerator.generateEcgWaveform(
-                durationSeconds = 60f,
-                fs = 130f,
-                heartRateBpm = 73f,
-                includeExtrasystoles = true
-            )
-
-            var sampleIdx = 0
-            val sampleDelayMs = (1000.0 / 130.0).toLong()
-
-            while (isActive) {
-                val now = System.currentTimeMillis()
-                val mv = waveform[sampleIdx]
-                val uV = mv * 1000f
-                val filtered = liveFilter.step(mv)
-
-                _liveSampleFlow.emit(EcgSample(now, uV, filtered))
-
-                sampleIdx = (sampleIdx + 1) % waveform.size
-                delay(sampleDelayMs)
-            }
-        }
-    }
-
-    fun stopSimulation() {
-        simulationJob?.cancel()
-        simulationJob = null
-    }
-
     @SuppressLint("MissingPermission")
     fun disconnect() {
-        stopSimulation()
         try {
             bluetoothGatt?.disconnect()
             bluetoothGatt?.close()
         } catch (_: Exception) {}
         bluetoothGatt = null
         _connectionState.value = BleConnectionState.Disconnected
+        _currentHeartRate.value = 0
+        _batteryLevel.value = 0
     }
 }

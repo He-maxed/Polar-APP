@@ -91,8 +91,6 @@ fun MainAppScreen(viewModel: MainViewModel) {
         val allGranted = permissions.values.all { it }
         if (allGranted) {
             viewModel.bleManager.startScan()
-        } else {
-            viewModel.bleManager.startSimulationMode("Polar H10 (Clinical Stream)")
         }
     }
 
@@ -124,7 +122,7 @@ fun MainAppScreen(viewModel: MainViewModel) {
                 },
                 onOpenRecordings = { showSessionsDialog = true },
                 onNewDetection = {
-                    viewModel.loadClinicalReferenceDataset()
+                    viewModel.toggleRecording()
                 },
                 onToggleRecording = { viewModel.toggleRecording() },
                 modifier = Modifier.statusBarsPadding()
@@ -153,7 +151,6 @@ fun MainAppScreen(viewModel: MainViewModel) {
                         sessionDuration = sessionDuration,
                         onNavigateTab = { viewModel.selectTab(it) },
                         onSearchFromBeginning = {
-                            viewModel.loadClinicalReferenceDataset()
                             viewModel.selectTab(AppTab.ECG_STRIP)
                         }
                     )
@@ -200,8 +197,8 @@ fun MainAppScreen(viewModel: MainViewModel) {
     if (showSessionsDialog) {
         SavedSessionsDialog(
             sessions = savedSessions,
-            onSelectSession = {
-                viewModel.loadClinicalReferenceDataset()
+            onSelectSession = { session ->
+                viewModel.loadSavedSession(session)
             },
             onDismiss = { showSessionsDialog = false }
         )

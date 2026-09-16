@@ -32,7 +32,16 @@ object HrvCalculator {
         }
 
         if (validRr.size < 4) {
-            return fallbackHrv()
+            return HrvResult(
+                rmssdMs = 0f,
+                sdnnMs = 0f,
+                meanRrMs = 0f,
+                averageHrBpm = 0f,
+                pnn50Percent = 0f,
+                lnRmssd = 0f,
+                averageRespiratoryRateBpm = 0f,
+                respirationTimeSeries = emptyList()
+            )
         }
 
         // 1. Mean RR & Average Heart Rate
@@ -102,13 +111,6 @@ object HrvCalculator {
             }
         }
 
-        if (respirationSeries.isEmpty()) {
-            val now = System.currentTimeMillis()
-            for (k in 0 until 12) {
-                respirationSeries.add(Pair(now - (12 - k) * 60000L, 12f + (k % 4) * 1.5f))
-            }
-        }
-
         return HrvResult(
             rmssdMs = rmssd,
             sdnnMs = sdnn,
@@ -118,23 +120,6 @@ object HrvCalculator {
             lnRmssd = lnRmssd,
             averageRespiratoryRateBpm = avgRespRate,
             respirationTimeSeries = respirationSeries
-        )
-    }
-
-    private fun fallbackHrv(): HrvResult {
-        val now = System.currentTimeMillis()
-        val dummyResp = (0..20).map { k ->
-            Pair(now - (20 - k) * 60000L, 13f + (k % 5) * 1.2f)
-        }
-        return HrvResult(
-            rmssdMs = 46f,
-            sdnnMs = 77f,
-            meanRrMs = 583f,
-            averageHrBpm = 103f,
-            pnn50Percent = 3f,
-            lnRmssd = 3.83f,
-            averageRespiratoryRateBpm = 14.29f,
-            respirationTimeSeries = dummyResp
         )
     }
 }

@@ -30,13 +30,9 @@ import com.example.model.WaveAnalysisResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.BufferOverflow
-import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -51,8 +47,6 @@ import java.util.UUID
 import kotlin.math.roundToInt
 
 private const val DISPLAY_FRAME_INTERVAL_MS = 66L
-
-private data class LiveDisplayFrame(val buffer: FloatArray)
 
 enum class AppTab(val title: String) {
     PERIODIC("Analyze"),
@@ -195,12 +189,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var lastDisplayFrameTimeMs = 0L
     @Volatile
     private var isDisplayFlowSuspended = false
-    private val _liveDisplayFrames = MutableSharedFlow<LiveDisplayFrame>(
-        replay = 1,
-        extraBufferCapacity = 4,
-        onBufferOverflow = BufferOverflow.DROP_OLDEST
-    )
-    private val liveDisplayFrames: SharedFlow<LiveDisplayFrame> = _liveDisplayFrames.asSharedFlow()
+    @Volatile
+    private var latestDisplayFrameCache: FloatArray? = null
 
     private val _isLivePaused = MutableStateFlow(false)
     val isLivePaused: StateFlow<Boolean> = _isLivePaused.asStateFlow()
@@ -254,7 +244,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-        // Display pipeline: DROP_OLDEST ring throttled into replay frames, never blocked by Room writes
+        // Display pipeline: DROP_OLDEST ring of recent samples throttled into the oscilloscope buffer
         viewModelScope.launch(Dispatchers.Default) {
             merge(polarSdkWrapper.liveSampleFlow, bleManager.liveSampleFlow).collect { sample ->
                 synchronized(displayHistoryLock) {
@@ -266,15 +256,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val now = System.currentTimeMillis()
                 if (!isDisplayFlowSuspended && !_isLivePaused.value && now - lastDisplayFrameTimeMs >= DISPLAY_FRAME_INTERVAL_MS) {
                     lastDisplayFrameTimeMs = now
-                    emitLatestDisplayFrame()
+                    val frame = buildLatestDisplayFrame()
+                    latestDisplayFrameCache = frame
+                    _liveOscilloscopeBuffer.value = frame
                 }
-            }
-        }
-
-        // Main-thread bridge: pushes the latest replay frame into the oscilloscope buffer
-        viewModelScope.launch(Dispatchers.Main.immediate) {
-            liveDisplayFrames.collect { frame ->
-                _liveOscilloscopeBuffer.value = frame.buffer
             }
         }
 
@@ -820,7 +805,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun onDisplayResumed() {
         isDisplayFlowSuspended = false
-        emitLatestDisplayFrame()
+        latestDisplayFrameCache?.let { _liveOscilloscopeBuffer.value = it }
     }
 
     fun onDisplayPaused() {
@@ -842,10 +827,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             buffer[offset + i] = snapshot[snapshot.size - n + i]
         }
         return buffer
-    }
-
-    private fun emitLatestDisplayFrame() {
-        _liveDisplayFrames.tryEmit(LiveDisplayFrame(buildLatestDisplayFrame()))
     }
 
     fun startHolterService() {

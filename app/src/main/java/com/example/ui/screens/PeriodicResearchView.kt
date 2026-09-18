@@ -1,9 +1,11 @@
 package com.example.ui.screens
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,12 +21,14 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Air
 import androidx.compose.material.icons.filled.BarChart
 import androidx.compose.material.icons.filled.CalendarToday
+import androidx.compose.material.icons.filled.DirectionsRun
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.MedicalServices
 import androidx.compose.material.icons.filled.QueryStats
 import androidx.compose.material.icons.filled.ShowChart
-import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -48,6 +52,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.model.RhythmEvent
 import com.example.ui.AppTab
 import com.example.ui.theme.ClinicalBg
 import com.example.ui.theme.ClinicalBorder
@@ -65,6 +70,15 @@ import com.example.ui.theme.TotalGrayBg
 import com.example.ui.theme.TotalGrayText
 import com.example.ui.theme.VebPinkBg
 import com.example.ui.theme.VebPinkText
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
+import com.example.model.RhythmEventType
+import com.example.ui.AnalysisSourceMode
+import com.example.ui.DetailedEcgViewState
+import com.example.ui.components.HeartRateTrendChart
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @Composable
 fun PeriodicResearchView(
@@ -74,8 +88,16 @@ fun PeriodicResearchView(
     extrapolationPerDay: Int,
     sessionTimestamp: String,
     sessionDuration: String,
+    rhythmEvents: List<RhythmEvent>,
+    analysisSourceMode: AnalysisSourceMode = AnalysisSourceMode.CURRENT_SESSION,
+    hrHistory: List<Pair<Long, Int>> = emptyList(),
+    detailViewState: DetailedEcgViewState = DetailedEcgViewState(),
     onNavigateTab: (AppTab) -> Unit,
     onSearchFromBeginning: () -> Unit,
+    onJumpToSnippet: (Long) -> Unit,
+    onSelectSourceMode: (AnalysisSourceMode) -> Unit = {},
+    onSelectHrZoom: (Int) -> Unit = {},
+    onSeekTimestamp: (Long) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val scrollState = rememberScrollState()
@@ -89,6 +111,36 @@ fun PeriodicResearchView(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
+        // Analysis Source Mode Selector (Current Session vs Saved Recording)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            FilterChip(
+                selected = analysisSourceMode == AnalysisSourceMode.CURRENT_SESSION,
+                onClick = { onSelectSourceMode(AnalysisSourceMode.CURRENT_SESSION) },
+                label = { Text("Current Session", fontSize = 12.sp, fontWeight = FontWeight.Bold) },
+                colors = FilterChipDefaults.filterChipColors(
+                    selectedContainerColor = MedicalTeal,
+                    selectedLabelColor = Color.White
+                ),
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag("chip_source_current")
+            )
+            FilterChip(
+                selected = analysisSourceMode == AnalysisSourceMode.SAVED_RECORDING,
+                onClick = { onNavigateTab(AppTab.SAVED_RECORDINGS) },
+                label = { Text("Saved Recordings", fontSize = 12.sp, fontWeight = FontWeight.Bold) },
+                colors = FilterChipDefaults.filterChipColors(
+                    selectedContainerColor = MedicalNavy,
+                    selectedLabelColor = Color.White
+                ),
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag("chip_source_saved")
+            )
+        }
         // Main Periodic Research Card
         Card(
             modifier = Modifier.fillMaxWidth(),
@@ -238,84 +290,296 @@ fun PeriodicResearchView(
                         color = SvebBlueText
                     )
                 }
+
+                // Quick jump to Detailed Full-Length ECG Strip
+                Button(
+                    onClick = { onNavigateTab(AppTab.ECG_STRIP) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(44.dp)
+                        .testTag("btn_inspect_full_strip"),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = MedicalTeal)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ShowChart,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Inspect Full-Length ECG Strip",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                    }
+                }
             }
         }
 
-        // Search from the beginning button
-        Button(
-            onClick = onSearchFromBeginning,
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(48.dp)
-                .testTag("btn_search_from_beginning"),
-            shape = RoundedCornerShape(12.dp),
-            colors = ButtonDefaults.buttonColors(containerColor = MedicalNavy)
-        ) {
-            Icon(
-                imageVector = Icons.Default.QueryStats,
-                contentDescription = null,
-                modifier = Modifier.size(18.dp)
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(
-                text = "Search from the beginning",
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Bold
-            )
-        }
+        // Heart Rate Trend Chart on Main Page with Min, Avg & Max HR values
+        HeartRateTrendChart(
+            hrPoints = hrHistory,
+            sessionStartTimeMs = detailViewState.sessionStartTimeMs,
+            sessionEndTimeMs = detailViewState.sessionEndTimeMs,
+            currentCursorTimeMs = detailViewState.centerTimeMs,
+            windowDurationSeconds = detailViewState.windowDurationSeconds,
+            selectedZoomMinutes = detailViewState.hrChartZoomMinutes,
+            onSelectZoomMinutes = onSelectHrZoom,
+            onSeekTimestamp = onSeekTimestamp,
+            modifier = Modifier.testTag("main_hr_trend_chart")
+        )
 
-        // Action Buttons: Wave analysis & Diagnostic
-        Row(
+        // Action Buttons: Wave analysis, HRV, Physical Activity & Diagnostic report
+        Column(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            OutlinedButton(
-                onClick = { onNavigateTab(AppTab.WAVES) },
-                modifier = Modifier
-                    .weight(1f)
-                    .height(56.dp)
-                    .testTag("btn_wave_analysis"),
-                shape = RoundedCornerShape(12.dp),
-                colors = ButtonDefaults.outlinedButtonColors(contentColor = MedicalTeal)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(
-                        imageVector = Icons.Default.BarChart,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = "Wave analysis (detailed)",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
+                OutlinedButton(
+                    onClick = { onNavigateTab(AppTab.WAVES) },
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(52.dp)
+                        .testTag("btn_wave_analysis"),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MedicalTeal)
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(
+                            imageVector = Icons.Default.BarChart,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = "Waves (detailed)",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+
+                OutlinedButton(
+                    onClick = { onNavigateTab(AppTab.HRV) },
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(52.dp)
+                        .testTag("btn_hrv_analysis"),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MedicalTeal)
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(
+                            imageVector = Icons.Default.Air,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = "HRV Metrics",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+
+                OutlinedButton(
+                    onClick = { onNavigateTab(AppTab.ACTIVITY) },
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(52.dp)
+                        .testTag("btn_activity_analysis"),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MedicalTeal)
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(
+                            imageVector = Icons.Default.DirectionsRun,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = "Activity",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
                 }
             }
 
             OutlinedButton(
                 onClick = { showDiagnosisCard = !showDiagnosisCard },
                 modifier = Modifier
-                    .weight(1f)
-                    .height(56.dp)
+                    .fillMaxWidth()
+                    .height(44.dp)
                     .testTag("btn_diagnostic"),
                 shape = RoundedCornerShape(12.dp),
                 colors = ButtonDefaults.outlinedButtonColors(
                     contentColor = if (showDiagnosisCard) MedicalTeal else ClinicalTextSecondary
                 )
             ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center
+                ) {
                     Icon(
                         imageVector = Icons.Default.MedicalServices,
                         contentDescription = null,
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(16.dp)
                     )
-                    Spacer(modifier = Modifier.height(2.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = "Diagnostic report",
-                        fontSize = 11.sp,
+                        text = if (showDiagnosisCard) "Hide Diagnostic Report" else "Show Diagnostic Report",
+                        fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold
                     )
+                }
+            }
+        }
+
+        // Detected Arrhythmias & Rhythm Events Card (AFib, VTach, Couplets, Pauses, etc.)
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = ClinicalSurface),
+            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.MedicalServices,
+                        contentDescription = null,
+                        tint = MedicalRed,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Detected Arrhythmias & Rhythm Events",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = ClinicalTextPrimary
+                    )
+                }
+
+                // Arrhythmia Filter Chips (Toggling each hides/shows that type)
+                var selectedTypes by remember {
+                    mutableStateOf(RhythmEventType.entries.toSet())
+                }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    RhythmEventType.entries.forEach { type ->
+                        val isSel = selectedTypes.contains(type)
+                        FilterChip(
+                            selected = isSel,
+                            onClick = {
+                                selectedTypes = if (isSel) selectedTypes - type else selectedTypes + type
+                            },
+                            label = { Text(type.title, fontSize = 11.sp, fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = MedicalRed,
+                                selectedLabelColor = Color.White
+                            ),
+                            modifier = Modifier.height(28.dp)
+                        )
+                    }
+                }
+
+                val filteredEvents = rhythmEvents.filter { selectedTypes.contains(it.type) }
+
+                if (filteredEvents.isEmpty()) {
+                    Text(
+                        text = if (rhythmEvents.isEmpty()) "No arrhythmias detected in this session." else "No events match the selected arrhythmia filters.",
+                        fontSize = 12.sp,
+                        color = ClinicalTextSecondary,
+                        lineHeight = 17.sp
+                    )
+                } else {
+                    val timeFmt = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+                    filteredEvents.forEach { event ->
+                        val startStr = timeFmt.format(Date(event.startTimestampMs))
+                        val endStr = timeFmt.format(Date(event.endTimestampMs))
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(12.dp),
+                            colors = CardDefaults.cardColors(containerColor = ClinicalCardBg),
+                            border = BorderStroke(1.dp, ClinicalBorder)
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = event.type.title,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MedicalRed
+                                    )
+                                    Text(
+                                        text = "$startStr - $endStr",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = ClinicalTextSecondary
+                                    )
+                                }
+                                Text(
+                                    text = event.details,
+                                    fontSize = 12.sp,
+                                    color = ClinicalTextPrimary,
+                                    lineHeight = 16.sp
+                                )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = String.format(Locale.US, "Duration: %.1fs", event.durationSeconds),
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = ClinicalTextSecondary
+                                    )
+                                    OutlinedButton(
+                                        onClick = { onJumpToSnippet(event.startTimestampMs) },
+                                        modifier = Modifier.height(32.dp),
+                                        shape = RoundedCornerShape(8.dp),
+                                        colors = ButtonDefaults.outlinedButtonColors(contentColor = MedicalTeal)
+                                    ) {
+                                        Text(
+                                            text = "Jump to snippet",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -346,12 +610,12 @@ fun PeriodicResearchView(
                         .border(1.dp, ClinicalBorder, RoundedCornerShape(8.dp))
                         .padding(8.dp)
                 ) {
-                    EvolutionExtrasystolesChart()
+                    EvolutionExtrasystolesChart(rhythmEvents = rhythmEvents)
                 }
             }
         }
 
-        // Medical Diagnosis Clinical Card (matches Screenshot 4)
+        // Medical Diagnosis Clinical Card
         if (showDiagnosisCard) {
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -388,22 +652,16 @@ fun PeriodicResearchView(
                         color = ClinicalTextPrimary
                     )
 
+                    val coupletCount = rhythmEvents.count { it.type == RhythmEventType.VEB_COUPLET }
                     Text(
-                        text = "The vast majority of your extrasystoles are of the ventricular type (VEB: 312 vs SVEB: 31). VEB are less common than SVEB (Supra Ventricular Ectopic Beats), but they can be more concerning, especially if they occur frequently or in certain patterns. Here are some possible interpretations of many VEB and almost no SVEB:",
+                        text = "Recorded Ectopy Breakdown: Ventricular (VEB: $vebCount) vs Supraventricular (SVEB: $svebCount). Total Ectopic Beats: $totalExtrasystoles.",
                         fontSize = 12.sp,
                         lineHeight = 18.sp,
                         color = ClinicalTextPrimary
                     )
 
                     Text(
-                        text = "• Benign VEB: In some cases, frequent VEB are simply a variation of normal heart rhythm and do not indicate any underlying disease, especially in healthy individuals without structural heart disease.",
-                        fontSize = 12.sp,
-                        lineHeight = 17.sp,
-                        color = ClinicalTextSecondary
-                    )
-
-                    Text(
-                        text = "• Couplets & Complex Ectopy: 19 VEB Couplets (consecutive pairs) detected with full compensatory pauses. Burden calculation indicates ~5.9% ventricular ectopy density (extrapolating to 6,302 beats/24h). Recommend 12-lead ECG and echocardiographic correlation.",
+                        text = "• Clinical Summary: $coupletCount VEB Couplet(s) detected during this session. Total extrapolated daily burden: $extrapolationPerDay ectopies/24h.",
                         fontSize = 12.sp,
                         lineHeight = 17.sp,
                         color = ClinicalTextSecondary
@@ -446,14 +704,13 @@ private fun StatPillBox(
 }
 
 @Composable
-private fun EvolutionExtrasystolesChart() {
+private fun EvolutionExtrasystolesChart(rhythmEvents: List<RhythmEvent>) {
     Canvas(modifier = Modifier.fillMaxSize()) {
         val w = size.width
         val h = size.height
         val paddingLeft = 32f
         val paddingBottom = 20f
 
-        // Grid lines
         val gridYSteps = 4
         for (i in 0..gridYSteps) {
             val y = (h - paddingBottom) * (i.toFloat() / gridYSteps)
@@ -465,17 +722,32 @@ private fun EvolutionExtrasystolesChart() {
             )
         }
 
-        // Stepped / time curve of extrasystoles
         val path = Path()
-        val points = listOf(
-            0.0f to 0.1f, 0.15f to 0.1f, 0.25f to 0.35f, 0.35f to 0.85f,
-            0.5f to 0.4f, 0.65f to 0.95f, 0.75f to 0.6f, 0.85f to 0.9f, 1.0f to 0.3f
-        )
+        if (rhythmEvents.size >= 2) {
+            val sortedEvents = rhythmEvents.sortedBy { it.startTimestampMs }
+            val startMs = sortedEvents.first().startTimestampMs
+            val endMs = sortedEvents.last().startTimestampMs
+            val spanMs = (endMs - startMs).coerceAtLeast(1000L).toFloat()
 
-        points.forEachIndexed { index, (px, py) ->
-            val x = paddingLeft + px * (w - paddingLeft)
-            val y = (h - paddingBottom) - py * (h - paddingBottom - 10f)
-            if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
+            var started = false
+            sortedEvents.forEachIndexed { idx, ev ->
+                val fracX = (ev.startTimestampMs - startMs).toFloat() / spanMs
+                val x = paddingLeft + fracX * (w - paddingLeft)
+                val normY = (idx.toFloat() / (sortedEvents.size - 1).toFloat()).coerceIn(0.1f, 0.9f)
+                val y = (h - paddingBottom) - normY * (h - paddingBottom - 10f)
+
+                if (!started) {
+                    path.moveTo(x, y)
+                    started = true
+                } else {
+                    path.lineTo(x, y)
+                }
+            }
+        } else {
+            // Flat baseline if no events
+            val y = (h - paddingBottom) * 0.9f
+            path.moveTo(paddingLeft, y)
+            path.lineTo(w, y)
         }
 
         drawPath(

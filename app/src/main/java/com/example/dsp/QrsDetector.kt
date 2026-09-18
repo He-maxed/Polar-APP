@@ -79,7 +79,7 @@ object QrsDetector {
      */
     fun estimateQrsWidthMs(signal: FloatArray, peakIdx: Int, fs: Float): Float {
         val n = signal.size
-        if (peakIdx !in 0 until n) return 90f
+        if (peakIdx !in 0 until n) return 0f
 
         val winSamples = (0.12f * fs).toInt()
         val peakVal = signal[peakIdx]

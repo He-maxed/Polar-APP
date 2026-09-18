@@ -20,6 +20,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.QueryStats
 import androidx.compose.material3.AlertDialog
@@ -61,6 +62,7 @@ import com.example.ui.theme.MedicalTeal
 @Composable
 fun WaveAnalysisView(
     waveAnalysis: WaveAnalysisResult?,
+    onBack: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val scrollState = rememberScrollState()
@@ -74,6 +76,28 @@ fun WaveAnalysisView(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
+        // Navigation header
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (onBack != null) {
+                IconButton(onClick = onBack) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = "Back to Analysis Overview",
+                        tint = ClinicalTextPrimary
+                    )
+                }
+                Spacer(modifier = Modifier.width(4.dp))
+            }
+            Text(
+                text = "Detailed Wave Analysis",
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold,
+                color = ClinicalTextPrimary
+            )
+        }
         // Superimposed Waveform Plot Card (Screenshot 8)
         Card(
             modifier = Modifier.fillMaxWidth(),

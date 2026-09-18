@@ -19,11 +19,13 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.DirectionsRun
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -46,17 +48,21 @@ import com.example.ui.theme.ClinicalTextPrimary
 import com.example.ui.theme.ClinicalTextSecondary
 import com.example.ui.theme.MedicalBlue
 import com.example.ui.theme.MedicalRed
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @Composable
 fun ActivityView(
     activityData: PhysicalActivityData?,
+    onBack: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val scrollState = rememberScrollState()
 
-    val steps = activityData?.steps ?: 6833
-    val distance = activityData?.distanceMeters ?: 5169
-    val velocity = String.format("%.2f", activityData?.currentVelocityKmh ?: 3.89f)
+    val steps = activityData?.steps ?: 0
+    val distance = activityData?.distanceMeters ?: 0
+    val velocity = String.format(Locale.US, "%.2f", activityData?.currentVelocityKmh ?: 0f)
 
     Column(
         modifier = modifier
@@ -66,6 +72,28 @@ fun ActivityView(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
+        // Navigation header
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (onBack != null) {
+                IconButton(onClick = onBack) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = "Back to Analysis Overview",
+                        tint = ClinicalTextPrimary
+                    )
+                }
+                Spacer(modifier = Modifier.width(4.dp))
+            }
+            Text(
+                text = "Physical Activity Tracking",
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold,
+                color = ClinicalTextPrimary
+            )
+        }
         // Physical Activity Card (Screenshot 5)
         Card(
             modifier = Modifier.fillMaxWidth(),
@@ -126,7 +154,10 @@ fun ActivityView(
                         .background(Color(0xFFFAFAFA))
                         .border(1.dp, Color(0xFFCFD8DC), RoundedCornerShape(8.dp))
                 ) {
-                    ActivityChartCanvas()
+                    ActivityChartCanvas(
+                        velSeries = activityData?.velocityTimeSeries ?: emptyList(),
+                        cadSeries = activityData?.cadenceTimeSeries ?: emptyList()
+                    )
                 }
 
                 Text(
@@ -280,7 +311,10 @@ private fun ZoneDistributionBar(
 }
 
 @Composable
-private fun ActivityChartCanvas() {
+private fun ActivityChartCanvas(
+    velSeries: List<Pair<Long, Float>>,
+    cadSeries: List<Pair<Long, Float>>
+) {
     Canvas(modifier = Modifier.fillMaxSize()) {
         val w = size.width
         val h = size.height
@@ -297,9 +331,9 @@ private fun ActivityChartCanvas() {
         }
 
         // Left axis: Velocity (0 to 8 km/h)
-        val vTicks = listOf(0, 2, 4, 6, 8)
+        val vTicks = listOf(0, 2, 4, 6, 8, 10, 12, 14)
         vTicks.forEach { v ->
-            val frac = v / 8f
+            val frac = v / 15f
             val y = (10f + plotH) - (frac * plotH)
             drawLine(
                 color = Color(0xFFECEFF1),
@@ -311,48 +345,57 @@ private fun ActivityChartCanvas() {
         }
 
         // Right axis: Cadence (0 to 120 /min)
-        val cTicks = listOf(0, 40, 80, 120)
+        val cTicks = listOf(0, 40, 80, 120, 160)
         cTicks.forEach { c ->
-            val frac = c / 120f
+            val frac = c / 160f
             val y = (10f + plotH) - (frac * plotH)
             drawContext.canvas.nativeCanvas.drawText("$c", w - 30f, y + 6f, paint)
         }
 
-        // Draw Orange Velocity line
         val velPath = Path()
-        val numPoints = 60
-        for (i in 0 until numPoints) {
-            val fracX = i.toFloat() / (numPoints - 1)
-            val x = leftMargin + fracX * plotW
-            val isRest = i in 36..48
-            val v = if (isRest) 2.1f + (i % 3) * 0.4f else 4.8f + (i % 4) * 0.6f
-            val fracY = (v / 8f).coerceIn(0f, 1f)
-            val y = (10f + plotH) - (fracY * plotH)
-
-            if (i == 0) velPath.moveTo(x, y) else velPath.lineTo(x, y)
-        }
-        drawPath(velPath, Color(0xFFE65100), style = Stroke(width = 2.0f))
-
-        // Draw Blue Cadence line
         val cadPath = Path()
-        for (i in 0 until numPoints) {
-            val fracX = i.toFloat() / (numPoints - 1)
-            val x = leftMargin + fracX * plotW
-            val isRest = i in 36..48
-            val c = if (isRest) 42f + (i % 5) * 3f else 88f + (i % 6) * 4f
-            val fracY = (c / 120f).coerceIn(0f, 1f)
-            val y = (10f + plotH) - (fracY * plotH)
+        
+        if (velSeries.isNotEmpty() && cadSeries.isNotEmpty()) {
+            val tStart = velSeries.minOf { it.first }
+            val tEnd = velSeries.maxOf { it.first }
+            val tSpan = (tEnd - tStart).coerceAtLeast(1000L).toFloat()
 
-            if (i == 0) cadPath.moveTo(x, y) else cadPath.lineTo(x, y)
-        }
-        drawPath(cadPath, Color(0xFF1E88E5), style = Stroke(width = 2.0f))
+            // Draw Orange Velocity line
+            var startedV = false
+            velSeries.sortedBy { it.first }.forEach { (t, v) ->
+                val fracX = (t - tStart) / tSpan
+                val x = leftMargin + fracX * plotW
+                val fracY = (v / 15f).coerceIn(0f, 1f)
+                val y = (10f + plotH) - (fracY * plotH)
+                if (!startedV) {
+                    velPath.moveTo(x, y)
+                    startedV = true
+                } else velPath.lineTo(x, y)
+            }
+            drawPath(velPath, Color(0xFFE65100), style = Stroke(width = 2.0f))
 
-        // X-axis timestamps
-        val times = listOf("10:30:00", "10:40:00", "10:50:00", "11:00:00", "11:10:00", "11:20:00", "11:30:00", "11:40:00")
-        times.forEachIndexed { index, lbl ->
-            if (index % 2 == 0) {
-                val fracX = index.toFloat() / (times.size - 1)
-                val x = leftMargin + fracX * plotW - 24f
+            // Draw Blue Cadence line
+            var startedC = false
+            cadSeries.sortedBy { it.first }.forEach { (t, c) ->
+                val fracX = (t - tStart) / tSpan
+                val x = leftMargin + fracX * plotW
+                val fracY = (c / 160f).coerceIn(0f, 1f)
+                val y = (10f + plotH) - (fracY * plotH)
+                if (!startedC) {
+                    cadPath.moveTo(x, y)
+                    startedC = true
+                } else cadPath.lineTo(x, y)
+            }
+            drawPath(cadPath, Color(0xFF1E88E5), style = Stroke(width = 2.0f))
+
+            // X-axis timestamps
+            val sdf = SimpleDateFormat("HH:mm", Locale.getDefault())
+            val numTicks = 5
+            for (i in 0 until numTicks) {
+                val fracX = i.toFloat() / (numTicks - 1)
+                val t = tStart + (fracX * (tEnd - tStart)).toLong()
+                val lbl = sdf.format(Date(t))
+                val x = leftMargin + fracX * plotW - 14f
                 drawContext.canvas.nativeCanvas.drawText(lbl, x, h - 4f, paint)
             }
         }

@@ -7,6 +7,7 @@ object ActivityProcessor {
     /**
      * Processes Polar ACC accelerometer samples (X, Y, Z in mg/g) to compute step count,
      * distance, velocity (km/h), cadence (/min), and extrasystole zone distribution.
+     * If no accelerometer stream was recorded (accelMag is empty), returns 0 steps / empty time series.
      */
     fun process(
         accelMag: FloatArray,
@@ -14,7 +15,11 @@ object ActivityProcessor {
         svebCount: Int,
         vebCount: Int
     ): PhysicalActivityData {
-        if (accelMag.size < 4 || timestampsMs.isEmpty()) {
+        val totalExtrasystoles = svebCount + vebCount
+        val restPercent = if (totalExtrasystoles > 0) ((vebCount.toFloat() / totalExtrasystoles.toFloat()) * 100).toInt() else 0
+        val recoveryPercent = if (totalExtrasystoles > 0) 100 - restPercent else 0
+
+        if (accelMag.isEmpty() || timestampsMs.isEmpty()) {
             return PhysicalActivityData(
                 steps = 0,
                 distanceMeters = 0,
@@ -22,14 +27,14 @@ object ActivityProcessor {
                 averageCadenceRpm = 0,
                 velocityTimeSeries = emptyList(),
                 cadenceTimeSeries = emptyList(),
-                extrasystoleRestPercent = 0,
-                extrasystoleRecoveryPercent = 0
+                extrasystoleRestPercent = restPercent,
+                extrasystoleRecoveryPercent = recoveryPercent
             )
         }
 
-        // 1. Peak detection in acceleration magnitude for steps
+        // Process real acceleration magnitude peaks (1.15g threshold)
         var steps = 0
-        val thresh = 1.15f // in g
+        val thresh = 1.15f
         for (i in 1 until accelMag.size - 1) {
             if (accelMag[i] > thresh && accelMag[i] > accelMag[i - 1] && accelMag[i] > accelMag[i + 1]) {
                 steps++
@@ -45,7 +50,6 @@ object ActivityProcessor {
         val velocityKmh = if (totalDurationHours > 0) (distanceMeters / 1000f) / totalDurationHours else 0f
         val cadence = if (totalDurationHours > 0) (steps / (totalDurationHours * 60f)).toInt() else 0
 
-        // Velocity & Cadence time series for chart
         val velSeries = ArrayList<Pair<Long, Float>>()
         val cadSeries = ArrayList<Pair<Long, Float>>()
         val chunkSize = (accelMag.size / 30).coerceAtLeast(10)
@@ -61,14 +65,10 @@ object ActivityProcessor {
                 }
             }
 
-            val t = if (timestampsMs.isNotEmpty()) {
-                val tIdx = ((idx.toFloat() / accelMag.size.toFloat()) * (timestampsMs.size - 1))
-                    .toInt()
-                    .coerceIn(0, timestampsMs.size - 1)
-                timestampsMs[tIdx]
-            } else {
-                System.currentTimeMillis()
-            }
+            val tIdx = ((idx.toFloat() / accelMag.size.toFloat()) * (timestampsMs.size - 1))
+                .toInt()
+                .coerceIn(0, timestampsMs.size - 1)
+            val t = timestampsMs[tIdx]
 
             val chunkMinutes = 2.5f
             val localCadence = (chunkSteps / chunkMinutes) * 60f
@@ -77,10 +77,6 @@ object ActivityProcessor {
             cadSeries.add(Pair(t, localCadence.coerceIn(0f, 160f)))
             idx += chunkSize
         }
-
-        val totalExtrasystoles = svebCount + vebCount
-        val restPercent = if (totalExtrasystoles > 0) ((vebCount.toFloat() / totalExtrasystoles.toFloat()) * 100).toInt() else 0
-        val recoveryPercent = if (totalExtrasystoles > 0) 100 - restPercent else 0
 
         return PhysicalActivityData(
             steps = steps,

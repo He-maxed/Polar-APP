@@ -16,8 +16,8 @@ import androidx.compose.material.icons.filled.Air
 import androidx.compose.material.icons.filled.Assessment
 import androidx.compose.material.icons.filled.DirectionsRun
 import androidx.compose.material.icons.filled.FiberManualRecord
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.ShowChart
-import androidx.compose.material.icons.filled.StackedBarChart
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -51,9 +51,16 @@ fun ClinicalBottomNavigation(
         verticalAlignment = Alignment.CenterVertically
     ) {
         NavTabItem(
+            icon = Icons.Default.FiberManualRecord,
+            label = "Live ECG",
+            isSelected = selectedTab == AppTab.LIVE_OSCILLOSCOPE,
+            onClick = { onTabSelected(AppTab.LIVE_OSCILLOSCOPE) },
+            testTag = "tab_live"
+        )
+        NavTabItem(
             icon = Icons.Default.Assessment,
-            label = "Analyze",
-            isSelected = selectedTab == AppTab.PERIODIC,
+            label = "Analysis",
+            isSelected = selectedTab == AppTab.PERIODIC || selectedTab == AppTab.HRV || selectedTab == AppTab.ACTIVITY || selectedTab == AppTab.WAVES,
             onClick = { onTabSelected(AppTab.PERIODIC) },
             testTag = "tab_analyze"
         )
@@ -65,32 +72,11 @@ fun ClinicalBottomNavigation(
             testTag = "tab_ecg"
         )
         NavTabItem(
-            icon = Icons.Default.FiberManualRecord,
-            label = "Live",
-            isSelected = selectedTab == AppTab.LIVE_OSCILLOSCOPE,
-            onClick = { onTabSelected(AppTab.LIVE_OSCILLOSCOPE) },
-            testTag = "tab_live"
-        )
-        NavTabItem(
-            icon = Icons.Default.Air,
-            label = "HRV",
-            isSelected = selectedTab == AppTab.HRV,
-            onClick = { onTabSelected(AppTab.HRV) },
-            testTag = "tab_hrv"
-        )
-        NavTabItem(
-            icon = Icons.Default.DirectionsRun,
-            label = "Activity",
-            isSelected = selectedTab == AppTab.ACTIVITY,
-            onClick = { onTabSelected(AppTab.ACTIVITY) },
-            testTag = "tab_activity"
-        )
-        NavTabItem(
-            icon = Icons.Default.StackedBarChart,
-            label = "Waves",
-            isSelected = selectedTab == AppTab.WAVES,
-            onClick = { onTabSelected(AppTab.WAVES) },
-            testTag = "tab_waves"
+            icon = Icons.Default.History,
+            label = "Recordings",
+            isSelected = selectedTab == AppTab.SAVED_RECORDINGS,
+            onClick = { onTabSelected(AppTab.SAVED_RECORDINGS) },
+            testTag = "tab_saved"
         )
     }
 }

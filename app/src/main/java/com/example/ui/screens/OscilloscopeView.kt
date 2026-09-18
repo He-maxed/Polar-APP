@@ -1,6 +1,8 @@
 package com.example.ui.screens
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -13,12 +15,14 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BookmarkBorder
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.FiberManualRecord
-import androidx.compose.material.icons.filled.Notes
+import androidx.compose.material.icons.filled.MedicalServices
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -42,14 +46,20 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.model.RhythmEvent
 import com.example.ui.components.RealtimeEcgCanvas
 import com.example.ui.theme.ClinicalBg
+import com.example.ui.theme.ClinicalBorder
+import com.example.ui.theme.ClinicalCardBg
 import com.example.ui.theme.ClinicalSurface
 import com.example.ui.theme.ClinicalTextPrimary
 import com.example.ui.theme.ClinicalTextSecondary
 import com.example.ui.theme.MedicalNavy
 import com.example.ui.theme.MedicalRed
 import com.example.ui.theme.MedicalTeal
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @Composable
 fun OscilloscopeView(
@@ -60,11 +70,14 @@ fun OscilloscopeView(
     onTogglePause: () -> Unit,
     onBookmarkSnippet: (String) -> Unit = {},
     heartRateBpm: Int = 0,
+    rhythmEvents: List<RhythmEvent> = emptyList(),
+    onJumpToSnippet: (Long) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var showSnippetDialog by remember { mutableStateOf(false) }
     var selectedSymptom by remember { mutableStateOf("Palpitations") }
     var snippetSavedToast by remember { mutableStateOf(false) }
+    val scrollState = rememberScrollState()
 
     val symptoms = listOf(
         "Palpitations",
@@ -161,6 +174,7 @@ fun OscilloscopeView(
         modifier = modifier
             .fillMaxSize()
             .background(ClinicalBg)
+            .verticalScroll(scrollState)
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
@@ -172,19 +186,14 @@ fun OscilloscopeView(
         ) {
             Column {
                 Text(
-                    text = "ECG Live Stream (130 Hz)",
+                    text = "ECG Live Stream",
                     fontSize = 15.sp,
                     fontWeight = FontWeight.Bold,
                     color = ClinicalTextPrimary
                 )
-                Text(
-                    text = "Showing 60 seconds continuous Holter buffer",
-                    fontSize = 12.sp,
-                    color = ClinicalTextSecondary
-                )
             }
 
-            // Snippet Record Button (replaces generic record stream)
+            // Snippet Record Button
             Row(
                 modifier = Modifier
                     .clip(RoundedCornerShape(20.dp))
@@ -236,17 +245,59 @@ fun OscilloscopeView(
             }
         }
 
-        // High-performance Canvas with 60-Second Multi-Row Holter & Sweep
-        RealtimeEcgCanvas(
-            buffer = liveBuffer,
-            sampleRateHz = 130f,
-            heartRateBpm = heartRateBpm,
-            isPaused = isPaused,
-            onTogglePause = onTogglePause,
+        // Recording Session Status Banner (clarifies Live vs Recording independence)
+        if (isRecording) {
+            val recMins = recordingDurationSeconds / 60
+            val recSecs = recordingDurationSeconds % 60
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MedicalRed.copy(alpha = 0.08f))
+                    .border(BorderStroke(1.dp, MedicalRed.copy(alpha = 0.3f)), RoundedCornerShape(8.dp))
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.FiberManualRecord,
+                        contentDescription = "Recording Active",
+                        tint = MedicalRed,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "Holter Background Recording Active",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MedicalRed
+                    )
+                }
+                Text(
+                    text = String.format(Locale.US, "%02d:%02d", recMins, recSecs),
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MedicalRed
+                )
+            }
+        }
+
+        // High-performance Canvas with 60-Second Multi-Row Holter & Sweep Toggle
+        Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .weight(1f)
-        )
+                .height(300.dp)
+        ) {
+            RealtimeEcgCanvas(
+                buffer = liveBuffer,
+                sampleRateHz = 130f,
+                heartRateBpm = heartRateBpm,
+                isPaused = isPaused,
+                onTogglePause = onTogglePause,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
 
         // Clinical Stream Specs Card
         Card(
@@ -258,28 +309,130 @@ fun OscilloscopeView(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(12.dp),
-                horizontalArrangement = Arrangement.SpaceAround,
+                    .padding(horizontal = 10.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "Sampling: 130 Hz (PMD)",
-                    fontSize = 12.sp,
+                    text = "Sampling: 130 Hz",
+                    fontSize = 11.sp,
                     fontWeight = FontWeight.Medium,
-                    color = ClinicalTextSecondary
+                    color = ClinicalTextSecondary,
+                    maxLines = 1
                 )
                 Text(
-                    text = "Buffer: 60 Seconds (7800 pts)",
-                    fontSize = 12.sp,
+                    text = "Filter: 0.05-40Hz",
+                    fontSize = 11.sp,
                     fontWeight = FontWeight.Medium,
-                    color = ClinicalTextSecondary
+                    color = ClinicalTextSecondary,
+                    maxLines = 1
                 )
-                Text(
-                    text = "Bandwidth: 0.05 - 40 Hz",
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = ClinicalTextSecondary
-                )
+            }
+        }
+
+        // Live Detected Anomalies Card (Live Stream Ectopy / Distortion Logs)
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = ClinicalSurface),
+            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.MedicalServices,
+                        contentDescription = null,
+                        tint = MedicalRed,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Live Detected Anomalies & Arrhythmia Logs",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = ClinicalTextPrimary
+                    )
+                }
+
+                if (rhythmEvents.isEmpty()) {
+                    Text(
+                        text = "No live anomalies detected yet. Incoming real-time events (SVEB, VEB, VTach, Pauses, AFib) will appear here with clickable jump-to-snippet buttons.",
+                        fontSize = 12.sp,
+                        color = ClinicalTextSecondary,
+                        lineHeight = 16.sp
+                    )
+                } else {
+                    val timeFmt = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+                    rhythmEvents.takeLast(10).reversed().forEach { event ->
+                        val startStr = timeFmt.format(Date(event.startTimestampMs))
+                        val endStr = timeFmt.format(Date(event.endTimestampMs))
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(12.dp),
+                            colors = CardDefaults.cardColors(containerColor = ClinicalCardBg),
+                            border = BorderStroke(1.dp, ClinicalBorder)
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = event.type.title,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MedicalRed
+                                    )
+                                    Text(
+                                        text = "$startStr - $endStr",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = ClinicalTextSecondary
+                                    )
+                                }
+                                Text(
+                                    text = event.details,
+                                    fontSize = 12.sp,
+                                    color = ClinicalTextPrimary,
+                                    lineHeight = 16.sp
+                                )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = String.format(Locale.US, "Duration: %.1fs", event.durationSeconds),
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = ClinicalTextSecondary
+                                    )
+                                    OutlinedButton(
+                                        onClick = { onJumpToSnippet(event.startTimestampMs) },
+                                        modifier = Modifier.height(32.dp),
+                                        shape = RoundedCornerShape(8.dp),
+                                        colors = ButtonDefaults.outlinedButtonColors(contentColor = MedicalTeal)
+                                    ) {
+                                        Text(
+                                            text = "Review Snippet",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }

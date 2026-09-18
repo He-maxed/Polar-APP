@@ -57,11 +57,17 @@ private const val DISPLAY_FRAME_INTERVAL_MS = 66L
 
 private data class LiveDisplayFrame(val buffer: FloatArray)
 
+enum class AnalysisSourceMode(val label: String) {
+    CURRENT_SESSION("Current Recording"),
+    SAVED_RECORDING("Saved Recording")
+}
+
 enum class AppTab(val title: String) {
-    PERIODIC("Analyze"),
-    ECG_STRIP("ECG"),
-    LIVE_OSCILLOSCOPE("Live"),
-    HRV("HRV"),
+    LIVE_OSCILLOSCOPE("Live View"),
+    SAVED_RECORDINGS("Recordings"),
+    PERIODIC("Analysis"),
+    ECG_STRIP("Strip Review"),
+    HRV("HRV & EDR"),
     ACTIVITY("Activity"),
     WAVES("Waves")
 }
@@ -189,6 +195,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _activityData = MutableStateFlow<PhysicalActivityData?>(null)
     val activityData: StateFlow<PhysicalActivityData?> = _activityData.asStateFlow()
 
+    // Analysis Source Mode (Current Session vs Saved Recording)
+    val analysisSourceMode = MutableStateFlow(AnalysisSourceMode.CURRENT_SESSION)
+
     private val bufferSize = 7800
     private val _liveOscilloscopeBuffer = MutableStateFlow(FloatArray(bufferSize))
     val liveOscilloscopeBuffer: StateFlow<FloatArray> = _liveOscilloscopeBuffer.asStateFlow()
@@ -231,12 +240,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 synchronized(sampleLock) {
                     if (now - lastHrRecordTimeMs >= 2000L) {
                         lastHrRecordTimeMs = now
-                        val effectiveHr = if (hr > 0) hr else 72
-                        hrAccumulator.add(Pair(now, effectiveHr))
-                        if (hrAccumulator.size > 86400) {
-                            hrAccumulator.removeAt(0)
+                        if (hr > 0) {
+                            hrAccumulator.add(Pair(now, hr))
+                            if (hrAccumulator.size > 86400) {
+                                hrAccumulator.removeAt(0)
+                            }
+                            if (analysisSourceMode.value == AnalysisSourceMode.CURRENT_SESSION) {
+                                _hrHistory.value = ArrayList(hrAccumulator)
+                            }
                         }
-                        _hrHistory.value = ArrayList(hrAccumulator)
                     }
 
                     if (_isRecording.value) {
@@ -245,9 +257,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         recordedTimestamps.add(sample.timestampMs)
                         continuousDbBuffer.add(sample)
 
-                        _detailViewState.value = _detailViewState.value.copy(
-                            sessionEndTimeMs = now
-                        )
+                        if (analysisSourceMode.value == AnalysisSourceMode.CURRENT_SESSION) {
+                            _detailViewState.value = _detailViewState.value.copy(
+                                sessionEndTimeMs = now
+                            )
+                        }
 
                         if (continuousDbBuffer.size >= 130) {
                             flushBufferToRoom()
@@ -308,6 +322,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.Default) {
             while (isActive) {
                 delay(3500L)
+                if (analysisSourceMode.value != AnalysisSourceMode.CURRENT_SESSION) {
+                    continue
+                }
                 try {
                     val (signal, times) = synchronized(sampleLock) {
                         if (recordedCorrectedSamples.size >= 260) {
@@ -360,11 +377,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
                             beatAnnotations.value = classification.annotations
                             rhythmEvents.value = classification.events
-
-                            // If on ECG strip tab, refresh window annotations
-                            if (_selectedTab.value == AppTab.ECG_STRIP) {
-                                updateVisibleWindow(_detailViewState.value.centerTimeMs, _detailViewState.value.windowDurationSeconds)
-                            }
                         }
                     }
                 } catch (e: Exception) {
@@ -397,13 +409,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val start = if (recordedTimestamps.isNotEmpty()) recordedTimestamps.first() else latest
                 Pair(latest, start)
             }
+            // Default to opening of app (startTime) to prevent auto live-streaming until "Latest" is pressed
             _detailViewState.value = _detailViewState.value.copy(
-                centerTimeMs = latestTime,
+                centerTimeMs = startTime,
                 sessionStartTimeMs = startTime,
                 sessionEndTimeMs = latestTime
             )
-            updateVisibleWindow(latestTime, _detailViewState.value.windowDurationSeconds)
+            updateVisibleWindow(startTime, _detailViewState.value.windowDurationSeconds)
         }
+    }
+
+    fun jumpToSnippet(timestampMs: Long) {
+        _detailViewState.value = _detailViewState.value.copy(
+            centerTimeMs = timestampMs
+        )
+        updateVisibleWindow(timestampMs, _detailViewState.value.windowDurationSeconds)
+        _selectedTab.value = AppTab.ECG_STRIP
     }
 
     fun toggleRecording() {
@@ -497,7 +518,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val hours = durationSec / 3600
             val mins = (durationSec % 3600) / 60
             val secs = durationSec % 60
-            _sessionDurationText.value = String.format("%02d h %02d min %02d sec", hours, mins, secs)
+            _sessionDurationText.value = String.format("%02d:%02d:%02d", hours, mins, secs)
 
             val sdf = SimpleDateFormat("yyyy-MM-dd 'à' HH:mm:ss", Locale.getDefault())
             _sessionTimestamp.value = sdf.format(Date(startTime))
@@ -546,7 +567,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             ecgRepository.logDetectionEvents(detectionEntities)
 
             // Save complete session metadata to Room database
-            val meanHr = if (hrv.averageHrBpm > 0) hrv.averageHrBpm.toInt() else 72
+            val validHrs = classification.annotations.mapNotNull { if (it.rrIntervalMs > 0) (60000f / it.rrIntervalMs).roundToInt() else null }
+            val meanHr = if (hrv.averageHrBpm > 0) hrv.averageHrBpm.toInt() else (if (validHrs.isNotEmpty()) validHrs.average().toInt() else 0)
+            val minHr = if (validHrs.isNotEmpty()) validHrs.minOrNull()!! else meanHr
+            val maxHr = if (validHrs.isNotEmpty()) validHrs.maxOrNull()!! else meanHr
+            val longestPauseMs = classification.events.filter { it.type == RhythmEventType.PAUSE }
+                .maxOfOrNull { it.durationSeconds * 1000f }
+                ?: classification.annotations.maxOfOrNull { it.rrIntervalMs }
+                ?: 0f
+
             val entity = RecordingSessionEntity(
                 sessionId = activeSessionId,
                 title = "Polar H10 Session ${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date(startTime))}",
@@ -557,31 +586,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 vebCount = veb,
                 coupletCount = classification.coupletCount,
                 meanHr = meanHr,
-                minHr = meanHr,
-                maxHr = meanHr,
+                minHr = minHr,
+                maxHr = maxHr,
                 sdnnMs = hrv.sdnnMs,
-                longestPauseMs = 0f,
+                longestPauseMs = longestPauseMs,
                 sampleRateHz = fs
             )
             ecgRepository.saveSession(entity)
         }
     }
 
+    fun deleteSession(sessionId: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            ecgRepository.deleteSession(sessionId)
+        }
+    }
+
+    fun setAnalysisSourceMode(mode: AnalysisSourceMode) {
+        analysisSourceMode.value = mode
+        if (mode == AnalysisSourceMode.CURRENT_SESSION) {
+            analyzeFromBeginning()
+        }
+    }
+
     fun loadSavedSession(session: RecordingSessionEntity) {
-        _sessionTimestamp.value = SimpleDateFormat("yyyy-MM-dd 'à' HH:mm:ss", Locale.getDefault()).format(Date(session.startTimestampMs))
+        analysisSourceMode.value = AnalysisSourceMode.SAVED_RECORDING
+        _sessionTimestamp.value = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(session.startTimestampMs))
         val hours = session.durationSeconds / 3600
         val mins = (session.durationSeconds % 3600) / 60
         val secs = session.durationSeconds % 60
-        _sessionDurationText.value = String.format("%02d h %02d min %02d sec", hours, mins, secs)
-        _svebCount.value = session.svebCount
-        _vebCount.value = session.vebCount
-        val total = session.svebCount + session.vebCount
-        _totalExtrasystoles.value = total
-        val extrap = if (session.durationSeconds > 0) ((total.toDouble() / session.durationSeconds.toDouble()) * 86400.0).toInt() else 0
-        _extrapolationPerDay.value = extrap
+        _sessionDurationText.value = String.format("%02d:%02d:%02d", hours, mins, secs)
 
-        // Load data points from Room if available
-        viewModelScope.launch(Dispatchers.IO) {
+        viewModelScope.launch(Dispatchers.Default) {
             val points = ecgRepository.getDataPointsForSession(session.sessionId)
             if (points.isNotEmpty()) {
                 val corrected = points.map { it.filteredMv }.toFloatArray()
@@ -594,6 +630,46 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val classification = BeatClassifier.classify(peaks, corrected, fs, session.startTimestampMs)
                 beatAnnotations.value = classification.annotations
                 rhythmEvents.value = classification.events
+
+                val sveb = classification.svebCount
+                val veb = classification.vebCount
+                val total = sveb + veb
+                _svebCount.value = sveb
+                _vebCount.value = veb
+                _totalExtrasystoles.value = total
+
+                val extrap = if (session.durationSeconds > 0) ((total.toDouble() / session.durationSeconds.toDouble()) * 86400.0).toInt() else 0
+                _extrapolationPerDay.value = extrap
+
+                val waveRes = WaveAnalyzer.analyze(corrected, peaks, fs)
+                _waveAnalysis.value = waveRes
+
+                val rrArray = classification.annotations.map { it.rrIntervalMs }.toFloatArray()
+                val timesArray = classification.annotations.map { it.timestampMs }.toLongArray()
+                val ampArray = classification.annotations.map { it.rAmplitudeMv }.toFloatArray()
+                val hrv = HrvCalculator.calculate(rrArray, timesArray, ampArray)
+                _hrvResult.value = hrv
+
+                val act = ActivityProcessor.process(FloatArray(0), timesArray, sveb, veb)
+                _activityData.value = act
+
+                // Build HR History for Loaded Saved Session from detected beat RR intervals
+                val savedHrPoints = classification.annotations.mapNotNull { ann ->
+                    if (ann.rrIntervalMs > 0) {
+                        val bpm = (60000f / ann.rrIntervalMs).roundToInt().coerceIn(30, 220)
+                        Pair(ann.timestampMs, bpm)
+                    } else null
+                }
+                _hrHistory.value = savedHrPoints
+
+                val endTime = session.startTimestampMs + (session.durationSeconds * 1000L).coerceAtLeast(1000L)
+                _detailViewState.value = _detailViewState.value.copy(
+                    sessionStartTimeMs = session.startTimestampMs,
+                    sessionEndTimeMs = endTime,
+                    centerTimeMs = session.startTimestampMs,
+                    currentEventDescription = "Recording: ${session.title}"
+                )
+                updateVisibleWindow(session.startTimestampMs, _detailViewState.value.windowDurationSeconds)
             }
         }
     }
@@ -622,6 +698,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val current = _detailViewState.value.windowDurationSeconds
         val newDur = if (zoomIn) (current * 0.7f).coerceAtLeast(2.5f) else (current * 1.4f).coerceAtMost(20f)
         _detailViewState.value = _detailViewState.value.copy(windowDurationSeconds = newDur)
+        updateVisibleWindow(_detailViewState.value.centerTimeMs, newDur)
     }
 
     fun navigateCouplet(direction: Int) {
@@ -663,28 +740,51 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val startMs = centerMs - halfWinMs
         val endMs = centerMs + halfWinMs
 
-        val (rawSlice, correctedSlice, timeSlice) = synchronized(sampleLock) {
-            if (recordedTimestamps.isNotEmpty()) {
-                val times = recordedTimestamps
-                var startIdx = times.binarySearch(startMs)
-                if (startIdx < 0) startIdx = (-startIdx - 1).coerceIn(0, times.size)
-                var endIdx = times.binarySearch(endMs)
-                if (endIdx < 0) endIdx = (-endIdx - 1).coerceIn(0, times.size)
-                if (endIdx <= startIdx && times.isNotEmpty()) {
-                    startIdx = (times.size - (durationSec * 130).toInt()).coerceAtLeast(0)
-                    endIdx = times.size
+        val (rawSlice, correctedSlice, timeSlice) = if (analysisSourceMode.value == AnalysisSourceMode.SAVED_RECORDING) {
+            val rawFull = fullSignalRaw.value
+            val corrFull = fullSignalCorrected.value
+            val totalSamples = corrFull.size
+            if (totalSamples > 0 && _detailViewState.value.sessionEndTimeMs > _detailViewState.value.sessionStartTimeMs) {
+                val totalSpanMs = (_detailViewState.value.sessionEndTimeMs - _detailViewState.value.sessionStartTimeMs).coerceAtLeast(1L)
+                val startFrac = (startMs - _detailViewState.value.sessionStartTimeMs).toFloat() / totalSpanMs.toFloat()
+                val endFrac = (endMs - _detailViewState.value.sessionStartTimeMs).toFloat() / totalSpanMs.toFloat()
+
+                val startIdx = (startFrac * totalSamples).toInt().coerceIn(0, totalSamples)
+                val endIdx = (endFrac * totalSamples).toInt().coerceIn(startIdx, totalSamples)
+
+                val raw = if (rawFull.size == totalSamples) rawFull.copyOfRange(startIdx, endIdx) else FloatArray(0)
+                val corr = corrFull.copyOfRange(startIdx, endIdx)
+                val tms = LongArray(endIdx - startIdx) { idx ->
+                    startMs + (idx.toFloat() / (endIdx - startIdx).coerceAtLeast(1) * (endMs - startMs)).toLong()
                 }
-                val raw = recordedRawSamples.subList(startIdx, endIdx).toFloatArray()
-                val corr = recordedCorrectedSamples.subList(startIdx, endIdx).toFloatArray()
-                val tms = recordedTimestamps.subList(startIdx, endIdx).toLongArray()
                 Triple(raw, corr, tms)
             } else {
-                val corr = synchronized(displayHistoryLock) {
-                    displayHistory.toList().toFloatArray()
+                Triple(FloatArray(0), FloatArray(0), LongArray(0))
+            }
+        } else {
+            synchronized(sampleLock) {
+                if (recordedTimestamps.isNotEmpty()) {
+                    val times = recordedTimestamps
+                    var startIdx = times.binarySearch(startMs)
+                    if (startIdx < 0) startIdx = (-startIdx - 1).coerceIn(0, times.size)
+                    var endIdx = times.binarySearch(endMs)
+                    if (endIdx < 0) endIdx = (-endIdx - 1).coerceIn(0, times.size)
+                    if (endIdx <= startIdx && times.isNotEmpty()) {
+                        startIdx = (times.size - (durationSec * 130).toInt()).coerceAtLeast(0)
+                        endIdx = times.size
+                    }
+                    val raw = recordedRawSamples.subList(startIdx, endIdx).toFloatArray()
+                    val corr = recordedCorrectedSamples.subList(startIdx, endIdx).toFloatArray()
+                    val tms = recordedTimestamps.subList(startIdx, endIdx).toLongArray()
+                    Triple(raw, corr, tms)
+                } else {
+                    val corr = synchronized(displayHistoryLock) {
+                        displayHistory.toList().toFloatArray()
+                    }
+                    val raw = corr.clone()
+                    val tms = LongArray(corr.size) { System.currentTimeMillis() - (corr.size - 1 - it) * 8L }
+                    Triple(raw, corr, tms)
                 }
-                val raw = corr.clone()
-                val tms = LongArray(corr.size) { System.currentTimeMillis() - (corr.size - 1 - it) * 8L }
-                Triple(raw, corr, tms)
             }
         }
 
@@ -739,9 +839,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 sessionId = activeSessionId,
                 timestampMs = now,
                 eventType = "SYMPTOM_SNIPPET",
-                hrBpm = if (hr > 0) hr else 75,
-                rrIntervalMs = if (hr > 0) (60000f / hr) else 800f,
-                rAmplitudeMv = if (snippetSamples.isNotEmpty()) snippetSamples.maxOrNull() ?: 1.0f else 1.0f,
+                hrBpm = hr,
+                rrIntervalMs = if (hr > 0) (60000f / hr) else 0f,
+                rAmplitudeMv = if (snippetSamples.isNotEmpty()) snippetSamples.maxOrNull() ?: 0f else 0f,
                 description = "Patient Holter Snippet: $tag at ${formatTime(now)}",
                 severity = "WARNING"
             )
@@ -750,6 +850,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun analyzeFromBeginning() {
+        analysisSourceMode.value = AnalysisSourceMode.CURRENT_SESSION
+        synchronized(sampleLock) {
+            _hrHistory.value = ArrayList(hrAccumulator)
+        }
         viewModelScope.launch(Dispatchers.Default) {
             val (raw, corrected, times) = synchronized(sampleLock) {
                 if (recordedCorrectedSamples.size >= 130) {
@@ -787,7 +891,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val hours = durationSec / 3600
                 val mins = (durationSec % 3600) / 60
                 val secs = durationSec % 60
-                _sessionDurationText.value = String.format("%02d h %02d min %02d sec", hours, mins, secs)
+                _sessionDurationText.value = String.format("%02d:%02d:%02d", hours, mins, secs)
 
                 val sdf = SimpleDateFormat("yyyy-MM-dd 'à' HH:mm:ss", Locale.getDefault())
                 _sessionTimestamp.value = sdf.format(Date(startTime))

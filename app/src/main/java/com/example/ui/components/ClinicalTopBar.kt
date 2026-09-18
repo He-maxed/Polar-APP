@@ -225,7 +225,7 @@ fun ClinicalTopBar(
                 testTag = "topbar_btn_recordings"
             )
 
-            // New detection / Analyze
+            // New detection / Analyze -> "Run Full DSP"
             TopActionItem(
                 icon = {
                     Icon(

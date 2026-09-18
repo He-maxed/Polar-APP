@@ -1,6 +1,5 @@
 package com.example.dsp
 
-import com.example.model.FiducialPoint
 import com.example.model.WaveAnalysisItem
 import com.example.model.WaveAnalysisResult
 import kotlin.math.abs
@@ -15,7 +14,19 @@ object WaveAnalyzer {
     ): WaveAnalysisResult {
         val nBeats = peaks.size
         if (nBeats < 3) {
-            return fallbackAnalysis()
+            return WaveAnalysisResult(
+                qrsDurationMs = 0f,
+                prIntervalMs = 0f,
+                qtIntervalMs = 0f,
+                qtcBazettMs = 0f,
+                stLevelMicrovolts = 0f,
+                st80Microvolts = 0f,
+                rAmplitudeMicrovolts = 0f,
+                pWaveDurationMs = 0f,
+                items = emptyList(),
+                averageMorphology = FloatArray(0),
+                sampleBeats = emptyList()
+            )
         }
 
         val qrsList = ArrayList<Float>()
@@ -44,7 +55,7 @@ object WaveAnalyzer {
             }
 
             // Fiducial identification
-            // 1. Q wave: local minimum between R-60ms and R
+            // 1. Q wave: local minimum between R-70ms and R
             val qRangeStart = (r - (0.07f * fs).toInt()).coerceAtLeast(0)
             var qMinIdx = r
             var qMinVal = signal[r]
@@ -70,7 +81,7 @@ object WaveAnalyzer {
             val qrsMs = ((sMinIdx - qMinIdx).coerceAtLeast(1) / fs) * 1000f
             qrsList.add(qrsMs)
 
-            // 3. P wave: local maximum in PR window (R-220ms to R-80ms)
+            // 3. P wave: local maximum in PR window (R-240ms to R-80ms)
             val pStart = (r - (0.24f * fs).toInt()).coerceAtLeast(0)
             val pEnd = (r - (0.08f * fs).toInt()).coerceAtLeast(pStart + 1)
             var pMaxIdx = pStart
@@ -81,14 +92,25 @@ object WaveAnalyzer {
                     pMaxIdx = k
                 }
             }
-            val pDurMs = (0.04f + abs(pMaxVal) * 0.02f) * 1000f
+
+            // Delineate real P-wave onset and offset baseline crossings
+            val pIsoIndex = (r - (0.26f * fs).toInt()).coerceAtLeast(0)
+            val pBaseline = signal[pIsoIndex]
+            val pThresh = pBaseline + (pMaxVal - pBaseline) * 0.20f
+
+            var pOnsetIdx = pMaxIdx
+            var pOffsetIdx = pMaxIdx
+            while (pOnsetIdx > pStart && signal[pOnsetIdx] > pThresh) pOnsetIdx--
+            while (pOffsetIdx < pEnd && signal[pOffsetIdx] > pThresh) pOffsetIdx++
+
+            val pDurMs = ((pOffsetIdx - pOnsetIdx).coerceAtLeast(1) / fs) * 1000f
             pWaveList.add(pDurMs)
 
             // PR Interval: P peak to Q peak
-            val prMs = ((qMinIdx - pStart).coerceAtLeast(1) / fs) * 1000f
-            prList.add(prMs.coerceIn(120f, 240f))
+            val prMs = ((qMinIdx - pMaxIdx).coerceAtLeast(1) / fs) * 1000f
+            prList.add(prMs.coerceIn(80f, 300f))
 
-            // 4. T wave: local maximum in ST-T window (R+120ms to R+350ms)
+            // 4. T wave: local maximum in ST-T window (R+120ms to R+380ms)
             val tStart = (r + (0.12f * fs).toInt()).coerceAtMost(signal.size - 1)
             val tEnd = (r + (0.38f * fs).toInt()).coerceAtMost(signal.size - 1)
             var tMaxIdx = tStart
@@ -102,7 +124,7 @@ object WaveAnalyzer {
 
             // QT Interval: Q to T offset
             val qtMs = ((tMaxIdx - qMinIdx + (0.06f * fs).toInt()) / fs) * 1000f
-            qtList.add(qtMs.coerceIn(280f, 480f))
+            qtList.add(qtMs.coerceIn(200f, 600f))
 
             // ST and ST80 deviation in microvolts
             val stMv = QrsDetector.measureStSegmentMv(signal, r, fs)
@@ -117,26 +139,42 @@ object WaveAnalyzer {
             rAmpList.add(abs(signal[r]) * 1000f)
         }
 
-        val meanQrs = if (qrsList.isNotEmpty()) qrsList.average().toFloat() else 126f
-        val meanPr = if (prList.isNotEmpty()) prList.average().toFloat() else 169f
-        val meanQt = if (qtList.isNotEmpty()) qtList.average().toFloat() else 332f
-        val meanSt = if (stList.isNotEmpty()) stList.average().toFloat() else 26f
-        val meanSt80 = if (st80List.isNotEmpty()) st80List.average().toFloat() else 28f
-        val meanR = if (rAmpList.isNotEmpty()) rAmpList.average().toFloat() else 537f
-        val meanP = if (pWaveList.isNotEmpty()) pWaveList.average().toFloat() else 41f
+        if (qrsList.isEmpty()) {
+            return WaveAnalysisResult(
+                qrsDurationMs = 0f,
+                prIntervalMs = 0f,
+                qtIntervalMs = 0f,
+                qtcBazettMs = 0f,
+                stLevelMicrovolts = 0f,
+                st80Microvolts = 0f,
+                rAmplitudeMicrovolts = 0f,
+                pWaveDurationMs = 0f,
+                items = emptyList(),
+                averageMorphology = FloatArray(0),
+                sampleBeats = emptyList()
+            )
+        }
+
+        val meanQrs = qrsList.average().toFloat()
+        val meanPr = prList.average().toFloat()
+        val meanQt = qtList.average().toFloat()
+        val meanSt = stList.average().toFloat()
+        val meanSt80 = st80List.average().toFloat()
+        val meanR = rAmpList.average().toFloat()
+        val meanP = pWaveList.average().toFloat()
 
         // Corrected QT (Bazett formula: QTc = QT / sqrt(RR))
         val avgRrSec = if (peaks.size > 1) ((peaks.last() - peaks.first()) / fs) / (peaks.size - 1) else 0.8f
         val qtcBazett = meanQt / sqrt(avgRrSec.coerceAtLeast(0.3f))
 
         // Normal range evaluation percentages
-        val qrsInNormal = if (qrsList.isNotEmpty()) ((qrsList.count { it < 120f } * 100f) / qrsList.size).toInt() else 59
-        val prInNormal = if (prList.isNotEmpty()) ((prList.count { it in 120f..220f } * 100f) / prList.size).toInt() else 25
-        val qtInNormal = if (qtList.isNotEmpty()) ((qtList.count { it < 450f } * 100f) / qtList.size).toInt() else 97
-        val stInNormal = if (stList.isNotEmpty()) ((stList.count { abs(it) <= 100f } * 100f) / stList.size).toInt() else 96
-        val st80InNormal = if (st80List.isNotEmpty()) ((st80List.count { abs(it) <= 100f } * 100f) / st80List.size).toInt() else 99
-        val rInNormal = if (rAmpList.isNotEmpty()) ((rAmpList.count { it < 2000f } * 100f) / rAmpList.size).toInt() else 100
-        val pInNormal = if (pWaveList.isNotEmpty()) ((pWaveList.count { it < 120f } * 100f) / pWaveList.size).toInt() else 99
+        val qrsInNormal = ((qrsList.count { it < 120f } * 100f) / qrsList.size).toInt()
+        val prInNormal = ((prList.count { it in 120f..220f } * 100f) / prList.size).toInt()
+        val qtInNormal = ((qtList.count { it < 450f } * 100f) / qtList.size).toInt()
+        val stInNormal = ((stList.count { abs(it) <= 100f } * 100f) / stList.size).toInt()
+        val st80InNormal = ((st80List.count { abs(it) <= 100f } * 100f) / st80List.size).toInt()
+        val rInNormal = ((rAmpList.count { it < 2000f } * 100f) / rAmpList.size).toInt()
+        val pInNormal = ((pWaveList.count { it < 120f } * 100f) / pWaveList.size).toInt()
 
         val items = listOf(
             WaveAnalysisItem(
@@ -222,30 +260,6 @@ object WaveAnalyzer {
             items = items,
             averageMorphology = avgMorph,
             sampleBeats = beatSnippets
-        )
-    }
-
-    private fun fallbackAnalysis(): WaveAnalysisResult {
-        return WaveAnalysisResult(
-            qrsDurationMs = 126f,
-            prIntervalMs = 169f,
-            qtIntervalMs = 332f,
-            qtcBazettMs = 385f,
-            stLevelMicrovolts = 26f,
-            st80Microvolts = 28f,
-            rAmplitudeMicrovolts = 537f,
-            pWaveDurationMs = 41f,
-            items = listOf(
-                WaveAnalysisItem("QRS(ms)", "<120ms", "126", 59, true, "Ventricular depolarization duration."),
-                WaveAnalysisItem("PR int.(ms)", "[120-220]ms", "169", 25, false, "Atrioventricular conduction time."),
-                WaveAnalysisItem("QT int.(ms)", "<450ms", "332", 97, false, "Total electrical systole duration."),
-                WaveAnalysisItem("ST (µV)", "± 0.1mV", "26", 96, false, "ST segment deviation from isoelectric baseline."),
-                WaveAnalysisItem("ST80 (µV)", "± 0.1mV", "28", 99, false, "ST segment level at 80ms past J-point."),
-                WaveAnalysisItem("R ampl(µV)", "<2mV", "537", 100, false, "R-peak voltage vector amplitude."),
-                WaveAnalysisItem("P wave(ms)", "<120ms", "41", 99, false, "Atrial depolarization duration.")
-            ),
-            averageMorphology = FloatArray(100),
-            sampleBeats = emptyList()
         )
     }
 }

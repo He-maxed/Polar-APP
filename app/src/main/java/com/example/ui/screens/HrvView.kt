@@ -45,6 +45,9 @@ import com.example.ui.theme.ClinicalTextPrimary
 import com.example.ui.theme.ClinicalTextSecondary
 import com.example.ui.theme.MedicalGreen
 import com.example.ui.theme.MedicalTeal
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @Composable
 fun HrvView(
@@ -53,13 +56,13 @@ fun HrvView(
 ) {
     val scrollState = rememberScrollState()
 
-    val rmssd = hrvResult?.rmssdMs?.toInt() ?: 46
-    val sdnn = hrvResult?.sdnnMs?.toInt() ?: 77
-    val meanRr = hrvResult?.meanRrMs?.toInt() ?: 583
-    val avgHr = hrvResult?.averageHrBpm?.toInt() ?: 103
-    val pnn50 = hrvResult?.pnn50Percent?.toInt() ?: 3
-    val lnRmssd = String.format("%.2f", hrvResult?.lnRmssd ?: 3.83f)
-    val avgRespRate = String.format("%.2f", hrvResult?.averageRespiratoryRateBpm ?: 14.29f)
+    val rmssd = hrvResult?.rmssdMs?.toInt()?.takeIf { it > 0 }?.toString() ?: "--"
+    val sdnn = hrvResult?.sdnnMs?.toInt()?.takeIf { it > 0 }?.toString() ?: "--"
+    val meanRr = hrvResult?.meanRrMs?.toInt()?.takeIf { it > 0 }?.toString() ?: "--"
+    val avgHr = hrvResult?.averageHrBpm?.toInt()?.takeIf { it > 0 }?.toString() ?: "--"
+    val pnn50 = hrvResult?.pnn50Percent?.toInt()?.takeIf { it >= 0 && hrvResult.rmssdMs > 0 }?.toString() ?: "--"
+    val lnRmssd = if ((hrvResult?.lnRmssd ?: 0f) > 0f) String.format(Locale.US, "%.2f", hrvResult!!.lnRmssd) else "--"
+    val avgRespRate = if ((hrvResult?.averageRespiratoryRateBpm ?: 0f) > 0f) String.format(Locale.US, "%.2f", hrvResult!!.averageRespiratoryRateBpm) else "--"
 
     Column(
         modifier = modifier
@@ -147,7 +150,7 @@ fun HrvView(
                         .background(Color(0xFFFAFAFA))
                         .border(1.dp, Color(0xFFCFD8DC), RoundedCornerShape(8.dp))
                 ) {
-                    RespirationPlotCanvas()
+                    RespirationPlotCanvas(hrvResult?.respirationTimeSeries ?: emptyList())
                 }
 
                 Text(
@@ -182,7 +185,7 @@ private fun HrvPillRow(text: String) {
 }
 
 @Composable
-private fun RespirationPlotCanvas() {
+private fun RespirationPlotCanvas(respirationTimeSeries: List<Pair<Long, Float>>) {
     Canvas(modifier = Modifier.fillMaxSize()) {
         val w = size.width
         val h = size.height
@@ -221,30 +224,33 @@ private fun RespirationPlotCanvas() {
         drawContext.canvas.nativeCanvas.drawText("Breaths per minute", -h / 2f - 70f, 24f, paint)
         drawContext.canvas.nativeCanvas.restore()
 
-        // Green authentic noisy respiration line chart matching Screenshot 7
         val path = Path()
-        val numPoints = 85
-        var started = false
+        
+        if (respirationTimeSeries.size > 1) {
+            val sortedSeries = respirationTimeSeries.sortedBy { it.first }
+            val tStart = sortedSeries.first().first
+            val tEnd = sortedSeries.last().first
+            val tSpan = (tEnd - tStart).coerceAtLeast(1000L).toFloat()
 
-        for (i in 0 until numPoints) {
-            val fracX = i.toFloat() / (numPoints - 1)
-            val x = leftMargin + fracX * plotW
+            var started = false
+            sortedSeries.forEach { (t, rate) ->
+                val fracX = (t - tStart).toFloat() / tSpan
+                val x = leftMargin + fracX * plotW
+                val fracY = (rate - minY).coerceIn(0f, rangeY) / rangeY
+                val y = (10f + plotH) - (fracY * plotH)
 
-            // Generate realistic physiological breaths/min curve between 7 and 32 bpm
-            val base = 14.5f
-            val spike = if (i == 12) 25f else if (i == 48) 16f else if (i == 68) 17f else 0f
-            val wave = kotlin.math.sin(i * 0.4).toFloat() * 4.5f + kotlin.math.cos(i * 0.9).toFloat() * 3.2f
-            val rate = (base + spike + wave).coerceIn(6f, 39f)
-
-            val fracY = (rate - minY) / rangeY
-            val y = (10f + plotH) - (fracY * plotH)
-
-            if (!started) {
-                path.moveTo(x, y)
-                started = true
-            } else {
-                path.lineTo(x, y)
+                if (!started) {
+                    path.moveTo(x, y)
+                    started = true
+                } else {
+                    path.lineTo(x, y)
+                }
             }
+        } else {
+            // Draw baseline if no data
+            val y = (10f + plotH) - ((14.5f - minY) / rangeY) * plotH
+            path.moveTo(leftMargin, y)
+            path.lineTo(leftMargin + plotW, y)
         }
 
         drawPath(
@@ -253,12 +259,18 @@ private fun RespirationPlotCanvas() {
             style = Stroke(width = 2.0f)
         )
 
-        // X-axis timestamps (10:30:00, 10:40:00, 10:50:00, 11:00:00, 11:10:00, 11:20:00, 11:30:00, 11:40:00)
-        val times = listOf("10:30:00", "10:40:00", "10:50:00", "11:00:00", "11:10:00", "11:20:00", "11:30:00", "11:40:00")
-        times.forEachIndexed { index, lbl ->
-            if (index % 2 == 0) { // draw every alternate to prevent overlap
-                val fracX = index.toFloat() / (times.size - 1)
-                val x = leftMargin + fracX * plotW - 24f
+        // X-axis timestamps
+        val sdf = SimpleDateFormat("HH:mm", Locale.getDefault())
+        if (respirationTimeSeries.size > 1) {
+            val sortedSeries = respirationTimeSeries.sortedBy { it.first }
+            val tStart = sortedSeries.first().first
+            val tEnd = sortedSeries.last().first
+            val numTicks = 5
+            for (i in 0 until numTicks) {
+                val fracX = i.toFloat() / (numTicks - 1)
+                val t = tStart + (fracX * (tEnd - tStart)).toLong()
+                val lbl = sdf.format(Date(t))
+                val x = leftMargin + fracX * plotW - 14f
                 drawContext.canvas.nativeCanvas.drawText(lbl, x, h - 4f, paint)
             }
         }

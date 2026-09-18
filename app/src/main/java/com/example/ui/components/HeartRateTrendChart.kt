@@ -75,10 +75,21 @@ fun HeartRateTrendChart(
     val effectiveEnd = if (sessionEndTimeMs > sessionStartTimeMs) sessionEndTimeMs else (sessionStartTimeMs + 3600_000L)
     val effectiveStart = sessionStartTimeMs.coerceAtMost(effectiveEnd - 1000L)
 
-    // Window displayed in chart based on selectedZoomMinutes
     val zoomSpanMs = selectedZoomMinutes.toLong() * 60_000L
-    val chartEndMs = effectiveEnd
-    val chartStartMs = (chartEndMs - zoomSpanMs).coerceAtLeast(effectiveStart)
+    
+    // Center the chart window around the current scrubber cursor time
+    var chartStartMs = currentCursorTimeMs - (zoomSpanMs / 2)
+    var chartEndMs = currentCursorTimeMs + (zoomSpanMs / 2)
+
+    // Shift window if it exceeds boundaries
+    if (chartStartMs < sessionStartTimeMs) {
+        chartStartMs = sessionStartTimeMs
+        chartEndMs = (chartStartMs + zoomSpanMs).coerceAtMost(effectiveEnd)
+    }
+    if (chartEndMs > effectiveEnd) {
+        chartEndMs = effectiveEnd
+        chartStartMs = (chartEndMs - zoomSpanMs).coerceAtLeast(sessionStartTimeMs)
+    }
 
     // Filter HR points inside the zoom window
     val visiblePoints = remember(hrPoints, chartStartMs, chartEndMs) {
@@ -89,9 +100,9 @@ fun HeartRateTrendChart(
         }
     }
 
-    val minHr = if (visiblePoints.isNotEmpty()) visiblePoints.minOf { it.second } else 60
-    val maxHr = if (visiblePoints.isNotEmpty()) visiblePoints.maxOf { it.second } else 100
-    val avgHr = if (visiblePoints.isNotEmpty()) (visiblePoints.map { it.second }.average()).toInt() else 75
+    val minHrStr = if (visiblePoints.isNotEmpty()) visiblePoints.minOf { it.second }.toString() else "--"
+    val maxHrStr = if (visiblePoints.isNotEmpty()) visiblePoints.maxOf { it.second }.toString() else "--"
+    val avgHrStr = if (visiblePoints.isNotEmpty()) (visiblePoints.map { it.second }.average()).toInt().toString() else "--"
 
     Card(
         modifier = modifier.fillMaxWidth(),
@@ -127,7 +138,7 @@ fun HeartRateTrendChart(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "Min: $minHr  Avg: $avgHr  Max: $maxHr bpm",
+                        text = "Min: $minHrStr  Avg: $avgHrStr  Max: $maxHrStr bpm",
                         fontSize = 11.sp,
                         color = ClinicalTextSecondary
                     )
@@ -235,18 +246,7 @@ fun HeartRateTrendChart(
                     }
 
                     // Build Curve Points
-                    val effectivePoints = if (visiblePoints.size >= 2) {
-                        visiblePoints
-                    } else {
-                        // Generate smooth baseline HR sequence if session is just starting
-                        val count = 20
-                        val span = (chartEndMs - chartStartMs).coerceAtLeast(60_000L)
-                        List(count) { i ->
-                            val t = chartStartMs + (i * span) / (count - 1)
-                            val simulatedHr = (72 + kotlin.math.sin(i * 0.4) * 6).toInt()
-                            Pair(t, simulatedHr)
-                        }
-                    }
+                    val effectivePoints = visiblePoints
 
                     val hrPath = Path()
                     val areaPath = Path()

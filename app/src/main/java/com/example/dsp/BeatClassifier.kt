@@ -4,6 +4,7 @@ import com.example.model.BeatAnnotation
 import com.example.model.BeatType
 import com.example.model.RhythmEvent
 import com.example.model.RhythmEventType
+import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.sqrt
 
@@ -54,10 +55,8 @@ object BeatClassifier {
             rr[i] = if (i > 0) ((p - peaks[i - 1]) / fs) * 1000f else 0f
         }
 
-        // Two-pass classification:
         // Pass 1: Tag premature beats and distinguish VEB vs SVEB based on width and compensatory pause
         for (i in 1 until n) {
-            // Compute rolling 8-beat local baseline RR
             var sum = 0f
             var cnt = 0
             val startK = (i - 8).coerceAtLeast(1)
@@ -159,13 +158,24 @@ object BeatClassifier {
             }
         }
 
-        // Check Bigeminy pattern: N-V-N-V-N-V
+        // Bigeminy pattern: N-V-N-V-N-V
         for (idx in 0 until n - 5) {
             if (labels[idx] == BeatType.NORMAL && labels[idx + 1] == BeatType.VEB &&
                 labels[idx + 2] == BeatType.NORMAL && labels[idx + 3] == BeatType.VEB &&
                 labels[idx + 4] == BeatType.NORMAL && labels[idx + 5] == BeatType.VEB
             ) {
                 for (k in idx..idx + 5) isBigeminy[k] = true
+            }
+        }
+
+        // Trigeminy pattern: N-N-V-N-N-V or N-V-N-N-V-N
+        for (idx in 0 until n - 5) {
+            if ((labels[idx] == BeatType.NORMAL && labels[idx + 1] == BeatType.NORMAL && labels[idx + 2] == BeatType.VEB &&
+                 labels[idx + 3] == BeatType.NORMAL && labels[idx + 4] == BeatType.NORMAL && labels[idx + 5] == BeatType.VEB) ||
+                (labels[idx] == BeatType.NORMAL && labels[idx + 1] == BeatType.VEB && labels[idx + 2] == BeatType.NORMAL &&
+                 labels[idx + 3] == BeatType.NORMAL && labels[idx + 4] == BeatType.VEB && labels[idx + 5] == BeatType.NORMAL)
+            ) {
+                for (k in idx..idx + 5) isTrigeminy[k] = true
             }
         }
 
@@ -188,6 +198,55 @@ object BeatClassifier {
                         sampleEndIndex = peaks[idx]
                     )
                 )
+            }
+        }
+
+        // ST Segment Elevation & Depression Events
+        var stElevStart = -1
+        var stDepStart = -1
+        for (idx in 0 until n) {
+            if (stDev[idx] >= ST_ELEV_THRESH_MV) {
+                if (stElevStart < 0) stElevStart = idx
+            } else {
+                if (stElevStart >= 0 && idx - stElevStart >= 3) {
+                    val startMs = startTimestampMs + ((peaks[stElevStart] / fs) * 1000).toLong()
+                    val endMs = startTimestampMs + ((peaks[idx - 1] / fs) * 1000).toLong()
+                    events.add(
+                        RhythmEvent(
+                            id = "ev_stelev_$stElevStart",
+                            type = RhythmEventType.ST_ELEVATION,
+                            startTimestampMs = startMs,
+                            endTimestampMs = endMs,
+                            durationSeconds = (endMs - startMs) / 1000f,
+                            details = String.format(Locale.US, "ST Segment Elevation (+%.2f mV / +%.1f mm)", stDev[stElevStart], stDev[stElevStart] * 10f),
+                            sampleStartIndex = peaks[stElevStart],
+                            sampleEndIndex = peaks[idx - 1]
+                        )
+                    )
+                }
+                stElevStart = -1
+            }
+
+            if (stDev[idx] <= ST_DEP_THRESH_MV) {
+                if (stDepStart < 0) stDepStart = idx
+            } else {
+                if (stDepStart >= 0 && idx - stDepStart >= 3) {
+                    val startMs = startTimestampMs + ((peaks[stDepStart] / fs) * 1000).toLong()
+                    val endMs = startTimestampMs + ((peaks[idx - 1] / fs) * 1000).toLong()
+                    events.add(
+                        RhythmEvent(
+                            id = "ev_stdep_$stDepStart",
+                            type = RhythmEventType.ST_DEPRESSION,
+                            startTimestampMs = startMs,
+                            endTimestampMs = endMs,
+                            durationSeconds = (endMs - startMs) / 1000f,
+                            details = String.format(Locale.US, "ST Segment Depression (%.2f mV / %.1f mm)", stDev[stDepStart], stDev[stDepStart] * 10f),
+                            sampleStartIndex = peaks[stDepStart],
+                            sampleEndIndex = peaks[idx - 1]
+                        )
+                    )
+                }
+                stDepStart = -1
             }
         }
 
@@ -230,6 +289,25 @@ object BeatClassifier {
                         )
                     )
                 }
+            }
+        }
+
+        if (inAfib) {
+            val durMs = ((peaks[n - 1] - peaks[afibStartIdx]) / fs * 1000).toLong()
+            if (durMs >= AFIB_MIN_MS) {
+                afibCount++
+                events.add(
+                    RhythmEvent(
+                        id = "ev_afib_$afibStartIdx",
+                        type = RhythmEventType.AFIB_SUSPECT,
+                        startTimestampMs = startTimestampMs + ((peaks[afibStartIdx] / fs) * 1000).toLong(),
+                        endTimestampMs = startTimestampMs + ((peaks[n - 1] / fs) * 1000).toLong(),
+                        durationSeconds = durMs / 1000f,
+                        details = "Sustained irregular RR pattern suggestive of Atrial Fibrillation (${durMs / 1000}s)",
+                        sampleStartIndex = peaks[afibStartIdx],
+                        sampleEndIndex = peaks[n - 1]
+                    )
+                )
             }
         }
 

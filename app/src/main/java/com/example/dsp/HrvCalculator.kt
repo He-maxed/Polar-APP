@@ -46,7 +46,7 @@ object HrvCalculator {
 
         // 1. Mean RR & Average Heart Rate
         val meanRr = validRr.average().toFloat()
-        val avgHr = if (meanRr > 0) 60000f / meanRr else 72f
+        val avgHr = if (meanRr > 0) 60000f / meanRr else 0f
 
         // 2. SDNN (Standard Deviation of NN intervals)
         var varSum = 0.0
@@ -69,15 +69,14 @@ object HrvCalculator {
             }
         }
 
-        val rmssd = if (nDiffs > 0) sqrt(sqDiffSum / nDiffs).toFloat() else 45f
-        val pnn50 = if (nDiffs > 0) (count50.toFloat() / nDiffs.toFloat()) * 100f else 3f
-        val lnRmssd = if (rmssd > 0) ln(rmssd.toDouble()).toFloat() else 3.8f
+        val rmssd = if (nDiffs > 0) sqrt(sqDiffSum / nDiffs).toFloat() else 0f
+        val pnn50 = if (nDiffs > 0) (count50.toFloat() / nDiffs.toFloat()) * 100f else 0f
+        val lnRmssd = if (rmssd > 0) ln(rmssd.toDouble()).toFloat() else 0f
 
         // 4. ECG-Derived Respiration (EDR)
-        // R-peak amplitude is modulated by thoracic impedance changes during respiration.
         val respirationSeries = ArrayList<Pair<Long, Float>>()
         val windowSize = 15 // 15 beats rolling window
-        var avgRespRate = 14.3f
+        var avgRespRate = 0f
 
         val minLenValid = minOf(validAmps.size, validTimes.size, validRr.size)
         if (minLenValid >= windowSize) {
@@ -94,16 +93,17 @@ object HrvCalculator {
                         zeroCrossings++
                     }
                 }
-                // zeroCrossings / 2 = full respiratory cycles in this time window
                 val winDurSec = (validRr.subList(i, i + windowSize).sum()) / 1000f
                 val rateBpm = if (winDurSec > 0) {
                     ((zeroCrossings / 2f) / winDurSec) * 60f
-                } else 14.3f
+                } else 0f
 
-                val clampedRate = rateBpm.coerceIn(8f, 32f)
-                respRates.add(clampedRate)
-                val t = if (i < validTimes.size) validTimes[i] else System.currentTimeMillis()
-                respirationSeries.add(Pair(t, clampedRate))
+                val clampedRate = rateBpm.coerceIn(0f, 40f)
+                if (clampedRate > 0) {
+                    respRates.add(clampedRate)
+                    val t = if (i < validTimes.size) validTimes[i] else System.currentTimeMillis()
+                    respirationSeries.add(Pair(t, clampedRate))
+                }
                 i += 5
             }
             if (respRates.isNotEmpty()) {

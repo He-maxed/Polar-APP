@@ -37,11 +37,17 @@ import androidx.compose.material.icons.filled.ZoomIn
 import androidx.compose.material.icons.filled.ZoomOut
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -52,6 +58,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.model.BeatAnnotation
@@ -95,6 +102,7 @@ fun DetailStripView(
     modifier: Modifier = Modifier
 ) {
     val scrollState = rememberScrollState()
+    var isSixRowMode by remember { mutableStateOf(false) }
 
     Column(
         modifier = modifier
@@ -147,16 +155,17 @@ fun DetailStripView(
                 val timeFmt = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
                 val windowCenterStr = if (viewState.centerTimeMs > 0) timeFmt.format(Date(viewState.centerTimeMs)) else ""
 
-                Row(
+                Column(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                    horizontalAlignment = Alignment.Start
                 ) {
                     Text(
                         text = viewState.currentEventDescription,
                         fontSize = 14.sp,
                         fontWeight = FontWeight.Bold,
-                        color = ClinicalTextPrimary
+                        color = ClinicalTextPrimary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                     Text(
                         text = if (windowCenterStr.isNotEmpty()) "Window: $windowCenterStr (±${(viewState.windowDurationSeconds / 2).toInt()}s)" else "",
@@ -166,25 +175,97 @@ fun DetailStripView(
                     )
                 }
 
+                // View Mode Selector (Single Window vs 6-Row Panel 10s x 6)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    FilterChip(
+                        selected = !isSixRowMode,
+                        onClick = { isSixRowMode = false },
+                        label = { Text("Single Window", fontSize = 11.sp, fontWeight = if (!isSixRowMode) FontWeight.Bold else FontWeight.Normal) },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = MedicalTeal,
+                            selectedLabelColor = Color.White
+                        ),
+                        modifier = Modifier
+                            .height(26.dp)
+                            .testTag("chip_view_single")
+                    )
+                    FilterChip(
+                        selected = isSixRowMode,
+                        onClick = { isSixRowMode = true },
+                        label = { Text("6-Row Panel (10s x 6 = 60s)", fontSize = 11.sp, fontWeight = if (isSixRowMode) FontWeight.Bold else FontWeight.Normal) },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = MedicalTeal,
+                            selectedLabelColor = Color.White
+                        ),
+                        modifier = Modifier
+                            .height(26.dp)
+                            .testTag("chip_view_6row")
+                    )
+                }
+
+                var visibleBeatTypes by remember {
+                    mutableStateOf(setOf(BeatType.VEB, BeatType.SVEB, BeatType.NORMAL))
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    listOf(
+                        BeatType.VEB to MedicalRed,
+                        BeatType.SVEB to Color(0xFFFFA000),
+                        BeatType.NORMAL to MedicalGreen
+                    ).forEach { (bType, color) ->
+                        val isSel = visibleBeatTypes.contains(bType)
+                        FilterChip(
+                            selected = isSel,
+                            onClick = {
+                                visibleBeatTypes = if (isSel) visibleBeatTypes - bType else visibleBeatTypes + bType
+                            },
+                            label = { Text(bType.code, fontSize = 11.sp, fontWeight = FontWeight.Bold) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = color,
+                                selectedLabelColor = Color.White
+                            ),
+                            modifier = Modifier.height(24.dp)
+                        )
+                    }
+                }
+
+                val activeAnnotationsFiltered = beatAnnotations.filter { visibleBeatTypes.contains(it.beatType) }
+
                 Spacer(modifier = Modifier.height(8.dp))
 
                 // ECG Canvas with real beat annotations & accurate timing
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(210.dp)
+                        .height(if (isSixRowMode) 320.dp else 210.dp)
                         .clip(RoundedCornerShape(8.dp))
                         .background(PaperEcgBg)
                         .border(1.dp, ClinicalBorder, RoundedCornerShape(8.dp))
                 ) {
-                    EcgStripCanvas(
-                        signal = signal,
-                        annotations = beatAnnotations,
-                        windowStartMs = viewState.windowStartMs,
-                        windowEndMs = viewState.windowEndMs,
-                        gainMmPerMv = viewState.gainMmPerMv,
-                        verticalOffsetMv = viewState.verticalOffsetMv
-                    )
+                    if (isSixRowMode) {
+                        EcgSixRowStripCanvas(
+                            signal = signal,
+                            annotations = activeAnnotationsFiltered,
+                            centerTimeMs = viewState.centerTimeMs,
+                            gainMmPerMv = viewState.gainMmPerMv,
+                            verticalOffsetMv = viewState.verticalOffsetMv
+                        )
+                    } else {
+                        EcgStripCanvas(
+                            signal = signal,
+                            annotations = activeAnnotationsFiltered,
+                            windowStartMs = viewState.windowStartMs,
+                            windowEndMs = viewState.windowEndMs,
+                            gainMmPerMv = viewState.gainMmPerMv,
+                            verticalOffsetMv = viewState.verticalOffsetMv
+                        )
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(6.dp))
@@ -273,13 +354,6 @@ fun DetailStripView(
                 label = "+30s",
                 onClick = { onStepTime(30f) },
                 testTag = "btn_nav_next_30",
-                modifier = Modifier.weight(1f)
-            )
-            ControlKeyButton(
-                icon = Icons.Default.LastPage,
-                label = "Latest",
-                onClick = { onSeekTimestamp(viewState.sessionEndTimeMs) },
-                testTag = "btn_nav_latest",
                 modifier = Modifier.weight(1f)
             )
         }
@@ -570,9 +644,7 @@ private fun EcgStripCanvas(
             val frac = (ann.timestampMs - windowStartMs).toFloat() / spanMs.toFloat()
             if (frac in 0.02f..0.98f) {
                 val dotX = leftMargin + frac * plotW
-                val dotMv = (ann.rAmplitudeMv * (gainMmPerMv / 10.0f)) + verticalOffsetMv
-                val normY = (dotMv - mvMin) / mvRange
-                val dotY = (10f + plotH) - (normY * plotH).coerceIn(10f, 10f + plotH)
+                val dotY = 10f + 16f // Place consistently near the top margin to avoid overlapping with waveform
 
                 val dotColor = when (ann.beatType) {
                     BeatType.VEB -> MedicalRed
@@ -601,7 +673,7 @@ private fun EcgStripCanvas(
                 drawContext.canvas.nativeCanvas.drawText(
                     ann.beatType.code,
                     dotX - 6f,
-                    dotY - 10f,
+                    dotY - 12f,
                     dotTagPaint
                 )
             }
@@ -621,6 +693,133 @@ private fun EcgStripCanvas(
                 h - 4f,
                 paint
             )
+        }
+    }
+}
+
+/**
+ * 6-Row Panel ECG Canvas (10s x 6 rows = 60s total).
+ * Displays target event snippet in Row 3 (middle) with 2 prior rows (prior 20s) and 3 subsequent rows (next 30s).
+ */
+@Composable
+private fun EcgSixRowStripCanvas(
+    signal: FloatArray,
+    annotations: List<BeatAnnotation>,
+    centerTimeMs: Long,
+    gainMmPerMv: Float,
+    verticalOffsetMv: Float
+) {
+    Canvas(modifier = Modifier.fillMaxSize()) {
+        val w = size.width
+        val h = size.height
+        val numRows = 6
+        val rowHeight = h / numRows.toFloat()
+        val leftMargin = 38f
+        val plotW = w - leftMargin - 10f
+
+        val textPaint = Paint().apply {
+            color = android.graphics.Color.DKGRAY
+            textSize = 18f
+            isAntiAlias = true
+        }
+
+        val rowDurationMs = 10000L // 10s per row
+        val panelStartMs = centerTimeMs - 20000L // Row 1 & 2 prior 20s, Row 3 center
+
+        val nSamples = signal.size
+
+        for (r in 0 until numRows) {
+            val rowTop = r * rowHeight
+            val rowMidY = rowTop + rowHeight / 2f
+            val rStartMs = panelStartMs + r * rowDurationMs
+            val rEndMs = rStartMs + rowDurationMs
+
+            // Baseline for row
+            drawLine(
+                color = PaperGridMinor,
+                start = Offset(leftMargin, rowMidY),
+                end = Offset(w - 10f, rowMidY),
+                strokeWidth = 0.8f
+            )
+
+            // Row Divider
+            if (r > 0) {
+                drawLine(
+                    color = ClinicalBorder,
+                    start = Offset(0f, rowTop),
+                    end = Offset(w, rowTop),
+                    strokeWidth = 1f
+                )
+            }
+
+            // Row Label
+            val labelStr = when (r) {
+                2 -> "TARGET EVENT"
+                0, 1 -> "-${(2 - r) * 10}s"
+                else -> "+${(r - 2) * 10}s"
+            }
+            drawContext.canvas.nativeCanvas.drawText(labelStr, 4f, rowMidY - 6f, textPaint)
+
+            // Draw ECG trace slice for row
+            if (nSamples > 0) {
+                val ecgPath = Path()
+                var started = false
+
+                val rowSampleStart = ((r * 10f / 60f) * nSamples).toInt().coerceIn(0, nSamples)
+                val rowSampleEnd = (((r + 1) * 10f / 60f) * nSamples).toInt().coerceIn(0, nSamples)
+
+                for (i in rowSampleStart until rowSampleEnd) {
+                    val frac = (i - rowSampleStart).toFloat() / (rowSampleEnd - rowSampleStart).coerceAtLeast(1).toFloat()
+                    val x = leftMargin + frac * plotW
+                    val mv = (signal[i] * (gainMmPerMv / 10.0f)) + verticalOffsetMv
+                    val normY = (mv - (-1.0f)) / 3.0f
+                    val y = rowTop + rowHeight - (normY * rowHeight).coerceIn(2f, rowHeight - 2f)
+
+                    if (!started) {
+                        ecgPath.moveTo(x, y)
+                        started = true
+                    } else {
+                        ecgPath.lineTo(x, y)
+                    }
+                }
+
+                drawPath(
+                    path = ecgPath,
+                    color = if (r == 2) MedicalRed else MedicalTeal,
+                    style = Stroke(width = 1.8f)
+                )
+            }
+
+            // Draw beat annotation markers (V, S, N) for row
+            val rowAnns = annotations.filter { it.timestampMs in rStartMs..rEndMs }
+            rowAnns.forEach { ann ->
+                val frac = (ann.timestampMs - rStartMs).toFloat() / rowDurationMs.toFloat()
+                if (frac in 0.01f..0.99f) {
+                    val dotX = leftMargin + frac * plotW
+                    val dotY = rowTop + 14f
+
+                    val dotColor = when (ann.beatType) {
+                        BeatType.VEB -> MedicalRed
+                        BeatType.SVEB -> Color(0xFFFFA000)
+                        BeatType.NORMAL -> MedicalGreen
+                        else -> MedicalTeal
+                    }
+
+                    drawCircle(color = dotColor, radius = 4.5f, center = Offset(dotX, dotY))
+
+                    val dotTagPaint = Paint().apply {
+                        color = when (ann.beatType) {
+                            BeatType.VEB -> android.graphics.Color.RED
+                            BeatType.SVEB -> android.graphics.Color.rgb(240, 140, 0)
+                            else -> android.graphics.Color.rgb(0, 140, 60)
+                        }
+                        textSize = 16f
+                        isFakeBoldText = true
+                        isAntiAlias = true
+                    }
+                    drawContext.canvas.nativeCanvas.drawText(ann.beatType.code, dotX - 5f, dotY - 6f, dotTagPaint)
+                }
+            }
         }
     }
 }

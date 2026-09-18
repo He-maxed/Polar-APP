@@ -1,6 +1,7 @@
 package com.example.ui.components
 
 import android.graphics.Paint
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -57,11 +58,12 @@ import com.example.ui.theme.ClinicalTextPrimary
 import com.example.ui.theme.ClinicalTextSecondary
 import com.example.ui.theme.MedicalGreen
 import com.example.ui.theme.MedicalTeal
+import java.util.Locale
 import kotlin.math.roundToInt
 
 enum class EcgDisplayMode(val label: String) {
-    MULTI_ROW_60S("60s (6 Rows)"),
-    SINGLE_SWEEP("Single Sweep")
+    SINGLE_SWEEP("Single Sweep"),
+    MULTI_ROW_60S("60s (6 Rows)")
 }
 
 enum class EcgTimeScale(val label: String, val windowSeconds: Float, val speedMmPerSec: Float) {
@@ -93,7 +95,7 @@ fun RealtimeEcgCanvas(
     onTogglePause: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
-    var displayMode by remember { mutableStateOf(EcgDisplayMode.MULTI_ROW_60S) }
+    var displayMode by remember { mutableStateOf(EcgDisplayMode.SINGLE_SWEEP) }
     var selectedTimeScale by remember { mutableStateOf(EcgTimeScale.SPEED_25) }
     var selectedVoltageScale by remember { mutableStateOf(EcgVoltageScale.GAIN_10) }
     var caliperX by remember { mutableFloatStateOf(-1f) }
@@ -110,7 +112,7 @@ fun RealtimeEcgCanvas(
             .padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        // Top Toolbar: HR Badge & Display Mode Selector (60s 6-Row vs Single Sweep)
+        // Top Toolbar: HR Badge & Display Mode Selector (Single Sweep vs 60s 6-Row)
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -120,7 +122,7 @@ fun RealtimeEcgCanvas(
                 Surface(
                     shape = RoundedCornerShape(6.dp),
                     color = if (heartRateBpm > 0) MedicalTeal.copy(alpha = 0.15f) else Color(0xFFEEEEEE),
-                    border = androidx.compose.foundation.BorderStroke(
+                    border = BorderStroke(
                         1.dp,
                         if (heartRateBpm > 0) MedicalTeal else Color(0xFFCCCCCC)
                     )
@@ -153,28 +155,8 @@ fun RealtimeEcgCanvas(
                 )
             }
 
-            // Mode Selector: 60s Holter vs Single Sweep
+            // Mode Selector: Single Sweep vs 60s 6-Row Panel
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                FilterChip(
-                    selected = displayMode == EcgDisplayMode.MULTI_ROW_60S,
-                    onClick = { displayMode = EcgDisplayMode.MULTI_ROW_60S },
-                    label = { Text("60s (6 Rows)", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
-                    leadingIcon = {
-                        Icon(
-                            imageVector = Icons.Default.TableRows,
-                            contentDescription = null,
-                            modifier = Modifier.size(14.dp)
-                        )
-                    },
-                    colors = FilterChipDefaults.filterChipColors(
-                        selectedContainerColor = MedicalTeal,
-                        selectedLabelColor = Color.White,
-                        selectedLeadingIconColor = Color.White
-                    ),
-                    modifier = Modifier
-                        .height(28.dp)
-                        .testTag("chip_mode_60s")
-                )
                 FilterChip(
                     selected = displayMode == EcgDisplayMode.SINGLE_SWEEP,
                     onClick = { displayMode = EcgDisplayMode.SINGLE_SWEEP },
@@ -194,6 +176,26 @@ fun RealtimeEcgCanvas(
                     modifier = Modifier
                         .height(28.dp)
                         .testTag("chip_mode_sweep")
+                )
+                FilterChip(
+                    selected = displayMode == EcgDisplayMode.MULTI_ROW_60S,
+                    onClick = { displayMode = EcgDisplayMode.MULTI_ROW_60S },
+                    label = { Text("60s (6 Rows)", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
+                    leadingIcon = {
+                        Icon(
+                            imageVector = Icons.Default.TableRows,
+                            contentDescription = null,
+                            modifier = Modifier.size(14.dp)
+                        )
+                    },
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = MedicalTeal,
+                        selectedLabelColor = Color.White,
+                        selectedLeadingIconColor = Color.White
+                    ),
+                    modifier = Modifier
+                        .height(28.dp)
+                        .testTag("chip_mode_60s")
                 )
             }
         }
@@ -246,7 +248,7 @@ fun RealtimeEcgCanvas(
                     val bufferLen = buffer.size
                     val offsetStart = (bufferLen - totalRequired).coerceAtLeast(0)
 
-                    val paint = Paint().apply {
+                    val textPaint = Paint().apply {
                         color = android.graphics.Color.DKGRAY
                         textSize = 18f
                         isAntiAlias = true
@@ -275,9 +277,9 @@ fun RealtimeEcgCanvas(
                             )
                         }
 
-                        // Row tag label: e.g. -50s, -40s ... 0s
+                        // Row tag label: e.g. -50s, -40s ... LIVE
                         val tag = if (timeOffsetSec == 0) "LIVE" else "-${timeOffsetSec}s"
-                        drawContext.canvas.nativeCanvas.drawText(tag, 6f, rowMidY - 8f, paint)
+                        drawContext.canvas.nativeCanvas.drawText(tag, 6f, rowMidY - 8f, textPaint)
 
                         // Calibration pulse on leftmost margin (1 mV step)
                         val calX = 42f
@@ -438,70 +440,40 @@ fun RealtimeEcgCanvas(
             }
         }
 
-        // Bottom Controls: Gain selector & Single Sweep speed selector
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
+        // Bottom Controls: Time scale & Gain selectors
+        if (displayMode == EcgDisplayMode.SINGLE_SWEEP) {
             Row(
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = "Gain: ",
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = ClinicalTextSecondary
-                )
-                EcgVoltageScale.values().forEach { gain ->
-                    val isSel = selectedVoltageScale == gain
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(if (isSel) ClinicalTextPrimary else Color(0xFFECEFF1))
-                            .padding(horizontal = 8.dp, vertical = 3.dp)
-                            .testTag("gain_${gain.name}")
-                            .pointerInput(Unit) {
-                                detectTapGestures { selectedVoltageScale = gain }
-                            }
-                    ) {
-                        Text(
-                            text = gain.label,
-                            fontSize = 11.sp,
-                            fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal,
-                            color = if (isSel) Color.White else ClinicalTextPrimary
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    EcgTimeScale.entries.forEach { scale ->
+                        FilterChip(
+                            selected = selectedTimeScale == scale,
+                            onClick = { selectedTimeScale = scale },
+                            label = { Text(scale.label, fontSize = 10.sp) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = MedicalTeal,
+                                selectedLabelColor = Color.White
+                            ),
+                            modifier = Modifier.height(24.dp)
                         )
                     }
                 }
-            }
 
-            if (displayMode == EcgDisplayMode.SINGLE_SWEEP) {
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    EcgTimeScale.values().forEach { scale ->
-                        val isSelected = selectedTimeScale == scale
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(4.dp))
-                                .background(if (isSelected) MedicalTeal else Color(0xFFF0F4F8))
-                                .border(
-                                    1.dp,
-                                    if (isSelected) MedicalTeal else Color(0xFFD0D8E0),
-                                    RoundedCornerShape(4.dp)
-                                )
-                                .padding(horizontal = 6.dp, vertical = 3.dp)
-                                .testTag("timescale_${scale.name}")
-                                .pointerInput(Unit) {
-                                    detectTapGestures { selectedTimeScale = scale }
-                                }
-                        ) {
-                            Text(
-                                text = scale.speedMmPerSec.toInt().toString() + "mm/s",
-                                fontSize = 10.sp,
-                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                                color = if (isSelected) Color.White else ClinicalTextPrimary
-                            )
-                        }
+                    EcgVoltageScale.entries.forEach { voltage ->
+                        FilterChip(
+                            selected = selectedVoltageScale == voltage,
+                            onClick = { selectedVoltageScale = voltage },
+                            label = { Text(voltage.label, fontSize = 10.sp) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = Color(0xFF37474F),
+                                selectedLabelColor = Color.White
+                            ),
+                            modifier = Modifier.height(24.dp)
+                        )
                     }
                 }
             }
@@ -509,98 +481,77 @@ fun RealtimeEcgCanvas(
     }
 }
 
-private fun DrawScope.drawClinicalGrid(w: Float, h: Float) {
-    val majorStep = 32f
-    val minorStep = majorStep / 5f
+private fun DrawScope.drawClinicalGrid(width: Float, height: Float) {
+    val pxPerMm = 4.2f
+    val minorStep = pxPerMm * 1f
+    val majorStep = pxPerMm * 5f
+
+    val minorGridColor = Color(0xFFFFEBEE)
+    val majorGridColor = Color(0xFFFFCDD2)
 
     var x = 0f
-    while (x <= w) {
+    while (x <= width) {
+        val isMajor = (x / majorStep).roundToInt() * majorStep == x
         drawLine(
-            color = Color(0xFFF0F0F0),
+            color = if (isMajor) majorGridColor else minorGridColor,
             start = Offset(x, 0f),
-            end = Offset(x, h),
-            strokeWidth = 0.6f
+            end = Offset(x, height),
+            strokeWidth = if (isMajor) 0.8f else 0.4f
         )
         x += minorStep
     }
 
     var y = 0f
-    while (y <= h) {
+    while (y <= height) {
+        val isMajor = (y / majorStep).roundToInt() * majorStep == y
         drawLine(
-            color = Color(0xFFF0F0F0),
+            color = if (isMajor) majorGridColor else minorGridColor,
             start = Offset(0f, y),
-            end = Offset(w, y),
-            strokeWidth = 0.6f
+            end = Offset(width, y),
+            strokeWidth = if (isMajor) 0.8f else 0.4f
         )
         y += minorStep
-    }
-
-    var mx = 0f
-    while (mx <= w) {
-        drawLine(
-            color = Color(0xFFE0E0E0),
-            start = Offset(mx, 0f),
-            end = Offset(mx, h),
-            strokeWidth = 1.0f
-        )
-        mx += majorStep
-    }
-
-    var my = 0f
-    while (my <= h) {
-        drawLine(
-            color = Color(0xFFE0E0E0),
-            start = Offset(0f, my),
-            end = Offset(w, my),
-            strokeWidth = 1.0f
-        )
-        my += majorStep
     }
 }
 
 private fun DrawScope.drawCaliperCrosshair(
     cx: Float,
     cy: Float,
-    w: Float,
-    h: Float,
+    width: Float,
+    height: Float,
     midY: Float,
     gainFactor: Float
 ) {
+    val caliperColor = Color(0xFFFFD54F)
+
     drawLine(
-        color = Color(0xFF00ACC1),
+        color = caliperColor,
         start = Offset(cx, 0f),
-        end = Offset(cx, h),
-        strokeWidth = 1.5f,
-        pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(8f, 8f))
+        end = Offset(cx, height),
+        strokeWidth = 1.2f
     )
 
     drawLine(
-        color = Color(0xFF00ACC1),
+        color = caliperColor,
         start = Offset(0f, cy),
-        end = Offset(w, cy),
-        strokeWidth = 1.5f,
-        pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(8f, 8f))
+        end = Offset(width, cy),
+        strokeWidth = 1.2f
     )
 
-    drawCircle(color = Color(0xFF00ACC1), radius = 6f, center = Offset(cx, cy))
+    drawCircle(color = caliperColor, radius = 5f, center = Offset(cx, cy))
 
-    val deltaY = midY - cy
-    val baseScaleY = (h / 3.2f) * gainFactor
-    val measuredMv = deltaY / baseScaleY
-
-    val caliperPaint = Paint().apply {
-        color = android.graphics.Color.rgb(0, 150, 160)
-        textSize = 28f
+    val measuredMv = (midY - cy) / ((height / 3.2f) * gainFactor)
+    val paint = Paint().apply {
+        color = android.graphics.Color.YELLOW
+        textSize = 22f
         isFakeBoldText = true
         isAntiAlias = true
     }
 
-    val boxX = (cx + 12f).coerceAtMost(w - 140f)
-    val boxY = (cy - 12f).coerceAtLeast(35f)
     drawContext.canvas.nativeCanvas.drawText(
-        String.format("%.2f mV", measuredMv),
-        boxX,
-        boxY,
-        caliperPaint
+        String.format(Locale.US, "%.2f mV", measuredMv),
+        (cx + 10f).coerceAtMost(width - 90f),
+        (cy - 10f).coerceAtLeast(24f),
+        paint
     )
 }
